@@ -30,7 +30,7 @@ The default mode is not tied to one project. On first access to a project path, 
 
 To use a fixed project, append `"--root", "/absolute/path/to/your-repository"` to `args`. Tool calls may then omit `directory_path`; if provided, it must refer to that same project.
 
-Associated workers exit when the client closes, stdin reaches EOF, or a termination signal arrives. stdout carries only the MCP protocol; logs go to stderr.
+Associated workers exit when the client closes, stdin reaches EOF, or a termination signal arrives. A worker that serves no request for five idle minutes also exits, which releases its repository writer lock for other sessions (`OCE_WORKER_IDLE_SECONDS`; `0` keeps it for the whole session). The next search starts a replacement from the saved index. stdout carries only the MCP protocol; logs go to stderr.
 
 ## Share a repository across clients
 

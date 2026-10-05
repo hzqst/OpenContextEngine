@@ -11,7 +11,7 @@ export function createMcpServer(config, {resolveConfig, automatic = false} = {})
   async function selectConfig(directoryPath) {
     if (resolveConfig) return resolveConfig(directoryPath);
     if (directoryPath !== undefined) throw new Error('Connected-service mode uses its configured repository; omit directory_path');
-    return config;
+    return {config,release:() => {}};
   }
   const pathSchema = z.string().min(1).describe('Absolute path to the project directory. Required in automatic workspace mode.');
   const directoryPath = automatic ? pathSchema : pathSchema.optional();
@@ -30,13 +30,16 @@ export function createMcpServer(config, {resolveConfig, automatic = false} = {})
       freshnessWaitMs:z.number().int().min(0).max(120000).default(30000)},
     annotations,
   }, async ({directory_path,query,budget,freshnessWaitMs}, extra) => {
+    let lease;
     try {
-      const selected = await selectConfig(directory_path);
-      const result = await search(query,{budget,freshnessWaitMs,config:selected,signal:extra.signal});
+      lease = await selectConfig(directory_path);
+      const result = await search(query,{budget,freshnessWaitMs,config:lease.config,signal:extra.signal});
       if (result.index?.mode !== 'live') throw new Error('This service uses a frozen index; connect to a service started with --root');
       return {content:[{type:'text',text:result.context || 'No matching source context.'}],structuredContent:result};
     } catch (error) {
       return {isError:true,content:[{type:'text',text:error.message}]};
+    } finally {
+      lease?.release();
     }
   });
   server.registerTool('index_status', {
@@ -46,12 +49,15 @@ export function createMcpServer(config, {resolveConfig, automatic = false} = {})
       + 'Status is the latest background observation; search_code actively checks source freshness.',
     inputSchema:{directory_path:directoryPath},annotations,
   }, async ({directory_path},extra) => {
+    let lease;
     try {
-      const selected = await selectConfig(directory_path);
-      const result = await indexStatus({config:selected,signal:extra.signal});
+      lease = await selectConfig(directory_path);
+      const result = await indexStatus({config:lease.config,signal:extra.signal});
       return {content:[{type:'text',text:JSON.stringify(result)}],structuredContent:result};
     } catch (error) {
       return {isError:true,content:[{type:'text',text:error.message}]};
+    } finally {
+      lease?.release();
     }
   });
   return server;
