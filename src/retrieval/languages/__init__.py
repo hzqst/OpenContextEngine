@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 import sys
 
 from . import python, typescript, text, go
-from .files import path_exclusion, read_text
+from .files import normalize_suffixes, path_exclusion, read_text
 from .schema import SCHEMA_VERSION, SourceFile, validate_units
 
 ADAPTERS = {'python': python, 'typescript': typescript, 'javascript': typescript, 'go': go, 'text': text}
@@ -42,10 +42,12 @@ def adapter_manifest(files, language_options=None):
             'sourceSha256': {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}}
 
 
-def source_units(root, files, max_lines=65, language_options=None, report=None, cache=None):
+def source_units(root, files, max_lines=65, language_options=None, report=None, cache=None,
+                 exclude_suffixes=()):
     if type(max_lines) is not int or max_lines < 1:
         raise ValueError('max_lines must be a positive integer')
     root = Path(root).resolve()
+    exclude_suffixes = normalize_suffixes(exclude_suffixes)
     groups, sources, seen, excluded = defaultdict(list), [], set(), []
     options = language_options or {}
     adapter_manifest(files, options)  # Validate configuration before reading source.
@@ -59,7 +61,7 @@ def source_units(root, files, max_lines=65, language_options=None, report=None, 
         resolved = (root/name).resolve()
         if not resolved.is_relative_to(root):
             raise ValueError('Source escapes snapshot root: ' + name)
-        reason = path_exclusion(name)
+        reason = path_exclusion(name, exclude_suffixes)
         if (root/name).is_symlink():
             reason = 'symlink'
         if reason:

@@ -33,6 +33,8 @@ export function serviceConfig({root, state, port = 0} = {}, environment = proces
     embeddingRevision: env.OCE_EMBEDDING_REVISION || '1',
     reranker: {...reranker, baseUrl: runtime.requestBaseUrl},
     languageOptions: env.OCE_LANGUAGE_OPTIONS ? JSON.parse(env.OCE_LANGUAGE_OPTIONS) : {},
+    // The worker validates each suffix; splitting keeps the environment form simple.
+    excludeSuffixes: (env.OCE_EXCLUDE_SUFFIXES || '').split(',').map(entry => entry.trim()).filter(Boolean),
     pollSeconds: Number(env.OCE_POLL_SECONDS || 1),
     debounceSeconds: Number(env.OCE_DEBOUNCE_SECONDS || .3)},
   };

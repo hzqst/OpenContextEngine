@@ -16,7 +16,7 @@ import numpy as np
 
 from engine import document, post
 from languages import adapter_manifest, source_units
-from languages.files import discover_snapshot
+from languages.files import discover_snapshot, normalize_suffixes
 from routed import RoutedEngine
 from writer_lock import acquire_writer_lock
 
@@ -51,6 +51,8 @@ class LiveIndex:
         if self.state.is_relative_to(self.root):
             raise ValueError('Live index state must be outside the repository root')
         self.options = config.get('languageOptions', {})
+        # Validated before the writer lock so an unusable configuration fails fast.
+        self.exclude_suffixes = normalize_suffixes(config.get('excludeSuffixes'))
         self.poll = float(config.get('pollSeconds', 1))
         self.debounce = float(config.get('debounceSeconds', .3))
         if not .05 <= self.poll <= 60 or not 0 <= self.debounce <= 10:
@@ -76,8 +78,10 @@ class LiveIndex:
         self.thread = threading.Thread(target=self._run, name='repository-index', daemon=True)
 
     def scan(self):
-        snapshot = discover_snapshot(self.root)
+        snapshot = discover_snapshot(self.root, self.exclude_suffixes)
         # Ignore diagnostic exclusions and mtime: identities bind actual inputs.
+        # Configured suffix exclusions reach the identity through this file list,
+        # so a policy that removes nothing leaves an existing index untouched.
         snapshot = {'files': [{'path': f['path'], 'sha256': f['sha256']} for f in snapshot['files']],
                     'languageOptions': self.options}
         return snapshot
@@ -164,7 +168,8 @@ class LiveIndex:
 
     def _build(self, snapshot, identity):
         start = time.monotonic()
-        units = source_units(self.root, snapshot['files'], language_options=self.options, cache=self.parse_cache)
+        units = source_units(self.root, snapshot['files'], language_options=self.options,
+                             cache=self.parse_cache, exclude_suffixes=self.exclude_suffixes)
         documents = [document(unit) for unit in units]
         keys = [digest([self.embedding, text]) for text in documents]
         vectors, missing = {}, {}

@@ -6,6 +6,7 @@ import re
 import subprocess
 
 MAX_BYTES = 1024 * 1024
+MAX_SUFFIXES = 64
 SKIP_DIRS = frozenset({'.git', '.hg', '.svn', 'node_modules', 'vendor', '.venv', 'venv',
                        '__pycache__', 'dist', 'build', 'target', '.next', '.cache',
                        '.pilot-state', 'runs'})
@@ -19,10 +20,38 @@ GENERATED = re.compile(r'(?im)^\s*(?://|#|/\*|\*)\s*(?:code generated\b[^\n]*do 
                        r'(?:this file (?:is|was) |@)?(?:auto[- ]?)?generated\b[^\n]*do not edit)')
 
 
-def path_exclusion(name):
+def normalize_suffixes(value):
+    """Validate configured exclusion suffixes. Each entry names a file ending, such as '.md'."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = value.split(',')
+    if not isinstance(value, (list, tuple)):
+        raise ValueError('OCE_EXCLUDE_SUFFIXES must be a comma-separated list of suffixes')
+    if len(value) > MAX_SUFFIXES:
+        raise ValueError(f'OCE_EXCLUDE_SUFFIXES accepts at most {MAX_SUFFIXES} suffixes')
+    suffixes = []
+    for entry in value:
+        if not isinstance(entry, str):
+            raise ValueError('OCE_EXCLUDE_SUFFIXES entries must be strings')
+        suffix = entry.strip().lower()
+        if not suffix:
+            continue
+        # A leading dot is required so a value like 'md' cannot match unrelated endings.
+        if (len(suffix) < 2 or not suffix.startswith('.') or suffix == '..'
+                or '/' in suffix or '\\' in suffix
+                or any(character in '*?' or character.isspace() for character in suffix)):
+            raise ValueError('Invalid OCE_EXCLUDE_SUFFIXES entry: ' + entry)
+        suffixes.append(suffix)
+    return tuple(dict.fromkeys(suffixes))
+
+
+def path_exclusion(name, exclude_suffixes=()):
     path = PurePosixPath(name)
     if set(path.parts[:-1]) & SKIP_DIRS:
         return 'dependency-or-build-directory'
+    if exclude_suffixes and name.lower().endswith(exclude_suffixes):
+        return 'configured-exclusion'
     if path.name in LOCKFILES or name.lower().endswith(SKIP_SUFFIXES):
         return 'generated-or-non-source-name'
     if path.name == '.env' or (path.name.startswith('.env.') and path.name not in {'.env.example', '.env.sample'}):
@@ -48,11 +77,12 @@ def read_text(path):
     return raw, text, None
 
 
-def discover_snapshot(root):
+def discover_snapshot(root, exclude_suffixes=()):
     """Use Git's ignore rules when available, otherwise a bounded directory walk."""
     root = Path(root).resolve()
     if not root.is_dir():
         raise ValueError('Source root must be a directory')
+    exclude_suffixes = normalize_suffixes(exclude_suffixes)
     git = subprocess.run(['git', '-C', str(root), 'rev-parse', '--is-inside-work-tree'],
                          capture_output=True, text=True)
     excluded, files = [], []
@@ -75,7 +105,7 @@ def discover_snapshot(root):
         discovery = 'directory-walk'
     for name in names:
         path = root/name
-        reason = path_exclusion(name)
+        reason = path_exclusion(name, exclude_suffixes)
         if path.is_symlink() or not path.resolve().is_relative_to(root):
             reason = 'symlink'
         elif not path.is_file():

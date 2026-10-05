@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'src/retrieval'))
 from languages import source_units, adapter_manifest
-from languages.files import discover_snapshot, MAX_BYTES
+from languages.files import discover_snapshot, normalize_suffixes, MAX_BYTES
 from languages.schema import SourceFile, validate_units
 from engine import build_index
 from engine import Engine
@@ -116,6 +116,40 @@ class TextFallbackTest(unittest.TestCase):
             self.assertEqual({f['path'] for f in snapshot['files']}, {'config.toml', 'src/main.rs'})
             self.assertEqual({r['reason'] for r in snapshot['excluded']},
                              {'dependency-or-build-directory', 'binary-content'})
+
+    def test_configured_suffixes_exclude_files_from_discovery_and_explicit_snapshots(self):
+        sources = {'app.py': 'x = 1\n', 'README.md': '# Title\n', 'guide.mdx': '# Guide\n'}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = self.write(root, sources)
+            snapshot = discover_snapshot(root, ('.md', '.mdx'))
+            self.assertEqual({f['path'] for f in snapshot['files']}, {'app.py'})
+            self.assertEqual({row['path']: row['reason'] for row in snapshot['excluded']},
+                             {'README.md': 'configured-exclusion', 'guide.mdx': 'configured-exclusion'})
+            report = {}
+            units = source_units(root, files, report=report, exclude_suffixes='.md')
+            self.assertEqual({u['path'] for u in units}, {'app.py', 'guide.mdx'})
+            self.assertEqual(report['excluded'], [{'path': 'README.md', 'reason': 'configured-exclusion'}])
+            # Without the option, documentation stays indexable as lossless text.
+            self.assertEqual([u['path'] for u in source_units(root, files)],
+                             ['app.py', 'README.md', 'guide.mdx'])
+
+    def test_configured_suffixes_default_to_no_additional_exclusion(self):
+        self.assertEqual(normalize_suffixes(None), ())
+        self.assertEqual(normalize_suffixes(''), ())
+        self.assertEqual(normalize_suffixes(' .MD , .mdx ,'), ('.md', '.mdx'))
+        self.assertEqual(normalize_suffixes(['.md', '.md']), ('.md',))
+
+    def test_invalid_configured_suffixes_are_rejected(self):
+        for value in (['md'], ['.'], ['..'], ['.m d'], ['.m/d'], ['.m*d'], ['']*65, ['.md', 7]):
+            with self.assertRaises(ValueError):
+                normalize_suffixes(value)
+        with tempfile.TemporaryDirectory() as directory:
+            files = self.write(Path(directory), {'app.py': 'x = 1\n'})
+            with self.assertRaises(ValueError):
+                discover_snapshot(directory, ('.md', '.'))
+            with self.assertRaises(ValueError):
+                source_units(directory, files, exclude_suffixes=('md',))
 
     def test_index_and_batched_search_accept_text_without_extra_model_rounds(self):
         with tempfile.TemporaryDirectory() as directory:

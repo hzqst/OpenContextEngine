@@ -162,7 +162,7 @@ State is stored in `~/.cache/opencontextengine/<repository-path-hash>/`. Overrid
 
 When model weights change under the same name, increment `OCE_EMBEDDING_REVISION`. A different provider, model name, or dimension count also invalidates vector reuse. Other models need separate compatibility and quality validation.
 
-Optional Go type analysis can be enabled with `OCE_LANGUAGE_OPTIONS='{"go":{"mode":"types"}}'`; the default uses syntax-based analysis. `OCE_PYTHON` selects an existing Python environment with the required dependencies; normal CLI installations use the runtime created by setup.
+Optional Go type analysis can be enabled with `OCE_LANGUAGE_OPTIONS='{"go":{"mode":"types"}}'`; the default uses syntax-based analysis. `OCE_EXCLUDE_SUFFIXES=.md,.mdx` keeps those file endings out of the index; documentation is indexed as text chunks by default. `OCE_PYTHON` selects an existing Python environment with the required dependencies; normal CLI installations use the runtime created by setup.
 
 ## Share one worker across clients
 
