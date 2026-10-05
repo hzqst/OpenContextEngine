@@ -1,3 +1,5 @@
+import contextlib
+import io
 from pathlib import Path
 import subprocess
 import sys
@@ -126,6 +128,31 @@ class LiveTests(unittest.TestCase):
         self.assertNotEqual(fixed.identity,first.identity)
         with self.assertRaises(IndexUnavailable):
             manager.verify(first)
+
+    def test_failed_update_reports_the_reason_in_status_and_logs_one_traceback(self):
+        self.write('a.txt','one\n')
+        attempts = []
+        def failing_embed(*args, **kwargs):
+            attempts.append(1)
+            return {'data':[]}  # Fewer rows than inputs: Invalid embedding response indices
+        manager = self.manager()
+        manager.embed = failing_embed
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            manager.start()
+            with self.assertRaisesRegex(IndexUnavailable,
+                'Index update failed: ValueError: Invalid embedding response indices'):
+                manager.current(5)
+            logged = stderr.getvalue()
+            deadline = time.monotonic()+5
+            while len(attempts) < 2 and time.monotonic() < deadline:  # The writer keeps retrying.
+                time.sleep(.05)
+        self.assertGreaterEqual(len(attempts),2)
+        self.assertEqual(stderr.getvalue(), logged)
+        self.assertIn('Traceback (most recent call last)', logged)
+        self.assertIn('Invalid embedding response indices', logged)
+        error = manager.status()['error']
+        self.assertEqual((error['type'], error['message']), ('ValueError','Invalid embedding response indices'))
 
     def test_background_updates_without_query_and_empty_repository(self):
         manager = self.manager().start()
