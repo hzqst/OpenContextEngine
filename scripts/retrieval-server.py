@@ -140,4 +140,12 @@ def serve(config):
 
 
 if __name__ == '__main__':
-    serve(json.loads(sys.stdin.readline()))
+    try:
+        serve(json.loads(sys.stdin.readline()))
+    except Exception as error:
+        # The launcher would otherwise report an exit code alone; name the reason first.
+        try:
+            print(json.dumps({'error':f'{type(error).__name__}: {error}'}),flush=True)
+        except OSError:
+            pass  # A closed pipe must not hide the traceback below.
+        raise

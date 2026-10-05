@@ -1,6 +1,10 @@
 """A numeric loopback worker must start without reverse DNS."""
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -21,3 +25,19 @@ class LoopbackServerTests(unittest.TestCase):
         server.socket.bind.assert_called_once_with(('127.0.0.1',0))
         self.assertEqual(server.server_name,'127.0.0.1')
         self.assertEqual(server.server_port,23456)
+
+
+class StartupFailureTests(unittest.TestCase):
+    def test_an_unusable_configuration_names_the_reason_before_exiting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)/'repo'
+            root.mkdir()
+            config = {'root':str(root),'state':str(Path(directory)/'index'),'serviceKey':'test-only',
+                      'excludeSuffixes':['md'],'pollSeconds':1,'debounceSeconds':.3}
+            failed = subprocess.run([sys.executable,str(SOURCE)],input=json.dumps(config)+'\n',
+                                    capture_output=True,encoding='utf-8')
+            self.assertEqual(failed.returncode,1)
+            # The launcher reports an exit code alone, so the worker names the reason itself.
+            self.assertEqual(json.loads(failed.stdout.strip())['error'],
+                             'ValueError: Invalid OCE_EXCLUDE_SUFFIXES entry: md')
+            self.assertIn('ValueError',failed.stderr)

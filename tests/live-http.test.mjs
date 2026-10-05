@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, delimiter, dirname, resolve } from 'node:path';
 import { search, indexStatus } from '../src/client.mjs';
 import { fixture, python } from './helpers/live-service.mjs';
@@ -11,6 +12,31 @@ test('A missing worker executable fails startup and closes without hanging', {ti
   await assert.rejects(worker.ready,/ENOENT/);
   await worker.close();
 });
+
+test('A worker that dies before listening reports its stderr tail instead of an exit code alone', {timeout:5000}, async () => {
+  const worker = startService({python:process.execPath,config:{}},{log:()=>{}});
+  await assert.rejects(worker.ready,error => {
+    assert.match(error.message,/Retrieval worker exited \(1\)/);
+    assert.match(error.message,/Worker stderr:\n\s*\S/); // The tail names the real cause.
+    return true;
+  });
+  await worker.close();
+});
+
+test('A worker that rejects its configuration reports the reason, not just the exit code',
+  {skip:!python,timeout:15000}, async t => {
+    const dir = await mkdtemp(join(tmpdir(),'oce-startup-failure-'));
+    t.after(() => rm(dir,{recursive:true,force:true}));
+    const root = join(dir,'repo');
+    await mkdir(root);
+    const worker = startService({python,config:{root,state:join(dir,'state'),port:0,
+      serviceKey:'test-only-at-least-24-characters',embeddingUrl:'http://127.0.0.1:1/v1',
+      embeddingIdentity:'https://test-model.invalid/v1',embeddingKey:'test-only',
+      reranker:{baseUrl:'http://127.0.0.1:1/v1'},pollSeconds:.05,debounceSeconds:0,
+      excludeSuffixes:['md']}},{log:()=>{}});
+    await assert.rejects(worker.ready,/Invalid OCE_EXCLUDE_SUFFIXES entry: md/);
+    await worker.close();
+  });
 
 test('Live HTTP search synchronizes saved files and rejects unauthorized/invalid requests',
   {skip:!python,timeout:15000}, async t => {

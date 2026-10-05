@@ -8,6 +8,10 @@ import { projectRoot, loadEnvironment } from './config.mjs';
 import { defaultPython, venvPython } from './runtime.mjs';
 import { embeddingTransportConfig, remoteRerankerConfig, rerankerExecutionTransport } from './eval/remote-models.mjs';
 
+const STARTUP_TIMEOUT_MS = 15000;
+// A startup failure only reports an exit code, so keep the tail of stderr for the caller.
+const DIAGNOSTIC_LINES = 12, DIAGNOSTIC_CHARS = 2000;
+
 export function serviceConfig({root, state, port = 0} = {}, environment = process.env) {
   const env = loadEnvironment(environment);
   const embedding = embeddingTransportConfig(env);
@@ -50,19 +54,34 @@ export function startService(settings, {log = line => process.stderr.write(line 
   });
   const lines = createInterface({input: child.stdout});
   const errors = createInterface({input: child.stderr});
-  errors.on('line', log);
+  const diagnostics = [];
+  errors.on('line', line => {
+    diagnostics.push(line);
+    if (diagnostics.length > DIAGNOSTIC_LINES) diagnostics.shift();
+    log(line);
+  });
+  function startupFailure(summary) {
+    const tail = diagnostics.join('\n').slice(-DIAGNOSTIC_CHARS);
+    return new Error(tail ? `${summary}\nWorker stderr:\n${tail}` : summary);
+  }
   child.stdin.on('error', () => {}); // Spawn/exit handlers report early failures.
   child.stdin.end(JSON.stringify(config) + '\n');
   const ready = new Promise((resolveReady, reject) => {
-    const timer = setTimeout(() => {child.kill(); reject(new Error('Retrieval worker startup timed out'));}, 15000);
+    const timer = setTimeout(() => {child.kill(); reject(startupFailure('Retrieval worker startup timed out'));}, STARTUP_TIMEOUT_MS);
     child.once('error', error => {clearTimeout(timer); reject(error);});
-    child.once('exit', code => {clearTimeout(timer); reject(new Error(`Retrieval worker exited (${code})`));});
+    child.once('exit', code => {clearTimeout(timer); reject(startupFailure(`Retrieval worker exited (${code})`));});
     lines.on('line', line => {
       try {
         const value = JSON.parse(line);
         if (value.listening) {
           clearTimeout(timer);
           resolveReady({baseUrl:value.listening, apiKey:config.serviceKey});
+          return;
+        }
+        // The worker names the reason before it exits with its traceback.
+        if (value.error) {
+          clearTimeout(timer);
+          reject(startupFailure(`Retrieval worker failed to start: ${value.error}`));
           return;
         }
       } catch { /* Non-protocol worker logs belong on stderr. */ }
