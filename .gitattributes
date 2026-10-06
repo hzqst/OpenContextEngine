@@ -1,0 +1,6 @@
+# Store every text file as LF and check it out as LF, so a working tree looks
+# the same on Windows, macOS and Linux and never depends on core.autocrlf.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending converted.
+*.png binary
