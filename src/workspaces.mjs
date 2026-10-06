@@ -1,7 +1,7 @@
 import { realpathSync, statSync } from 'node:fs';
 import { isAbsolute, resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { serviceConfig, startService } from './service.mjs';
+import { serviceConfig, startSharedService } from './service.mjs';
 import { loadEnvironment } from './config.mjs';
 
 // A failed worker start repeats identically, so retrying every call only spawns doomed processes.
@@ -31,7 +31,7 @@ function repeat(sweep, interval) {
 }
 
 // Each canonical repository owns one worker, including while it is starting.
-export function createWorkspaceManager({root, state} = {}, {configure = serviceConfig, start = startService,
+export function createWorkspaceManager({root, state} = {}, {configure = serviceConfig, start = startSharedService,
   environment = process.env, now = () => Date.now(), retryMs = STARTUP_RETRY_MS, idleMs = idleWindow(environment),
   schedule = repeat, cancel = clearInterval} = {}) {
   const fixedRoot = root ? directory(resolve(root)) : undefined;
@@ -72,6 +72,19 @@ export function createWorkspaceManager({root, state} = {}, {configure = serviceC
       failures.delete(repository);
     }
     let entry = workers.get(repository);
+    if (entry?.started && entry.worker.check) {
+      const checking = entry;
+      checking.leases++;
+      try {await entry.worker.check();} catch {
+        if (workers.get(repository) === entry) workers.delete(repository);
+        await entry.worker.close();
+        entry = workers.get(repository);
+      } finally {
+        checking.leases--;
+        checking.idleSince = now();
+      }
+      if (closing) throw new Error('MCP workspace manager is shutting down');
+    }
     if (!entry) {
       const workspaceState = state && (fixedRoot ? state : join(resolve(state),
         createHash('sha256').update(repository).digest('hex').slice(0, 24)));
@@ -80,7 +93,7 @@ export function createWorkspaceManager({root, state} = {}, {configure = serviceC
       workers.set(repository, entry);
       const remove = () => {if (workers.get(repository) === entry) workers.delete(repository);};
       worker.child.once('exit', remove);
-      entry.ready = worker.ready.catch(async error => {
+      entry.ready = worker.ready.then(config => {entry.started = true; return config;}).catch(async error => {
         failures.set(repository, {at:now(), message:error.message});
         try {await worker.close();} finally {remove();}
         throw error;

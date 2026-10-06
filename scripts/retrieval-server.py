@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src' / 'retrieval'))
 from routed import RoutedEngine, VERSION
 from live import LiveIndex, IndexUnavailable
+from shared_worker import SharedWorker
 
 
 class LoopbackHTTPServer(ThreadingHTTPServer):
@@ -56,8 +57,19 @@ def serve(config):
         with urlopen(model_base+'/healthz',timeout=10) as response:
             health['reranker'] = json.load(response)
     lock = threading.Lock()
+    shared = SharedWorker(config) if config.get('shared') and live else None
 
     class Handler(BaseHTTPRequestHandler):
+        def handle(self):
+            self.connection.settimeout(10)
+            if shared and not shared.enter():
+                return
+            try:
+                super().handle()
+            finally:
+                if shared:
+                    shared.leave()
+
         def log_message(self, *args):
             pass
 
@@ -79,6 +91,20 @@ def serve(config):
             self.reply(404,{'error':'Not found'})
 
         def do_POST(self):
+            if self.path == '/lease' and shared:
+                if not secrets.compare_digest(self.headers.get('Authorization',''), 'Bearer '+config['serviceKey']):
+                    return self.reply(401, {'error':'Unauthorized'})
+                try:
+                    length = int(self.headers.get('Content-Length','0'))
+                    if not 1 <= length <= 2048:
+                        raise ValueError('Invalid lease body')
+                    body = json.loads(self.rfile.read(length))
+                    if not isinstance(body, dict):
+                        raise ValueError('Invalid lease body')
+                except (ValueError, TypeError):
+                    return self.reply(422, {'error':'Invalid lease body'})
+                status, result = shared.lease(body)
+                return self.reply(status, result)
             if self.path!='/search':
                 return self.reply(404,{'error':'Not found'})
             if not secrets.compare_digest(self.headers.get('Authorization',''), 'Bearer '+config['serviceKey']):
@@ -129,22 +155,31 @@ def serve(config):
 
     server = LoopbackHTTPServer(('127.0.0.1',config.get('port',23505)),Handler)
     server.daemon_threads = True
+    if shared:
+        shared.publish(server.server_port)
+        threading.Thread(target=shared.monitor, args=(server,), daemon=True).start()
     print(json.dumps({'listening':f'http://127.0.0.1:{server.server_port}',
                       'health':{'status':'running','mode':'live'} if live else health}),flush=True)
     try:
         server.serve_forever()
     finally:
         server.server_close()
+        if shared:
+            shared.remove()
         if live:
             live.close()
 
 
 if __name__ == '__main__':
+    config = {}
     try:
-        serve(json.loads(sys.stdin.readline()))
+        config = json.loads(sys.stdin.readline())
+        serve(config)
     except Exception as error:
         # The launcher would otherwise report an exit code alone; name the reason first.
         try:
+            if config.get('shared'):
+                Path(config['shared']['errorPath']).write_text(json.dumps({'error':f'{type(error).__name__}: {error}'}), encoding='utf-8')
             print(json.dumps({'error':f'{type(error).__name__}: {error}'}),flush=True)
         except OSError:
             pass  # A closed pipe must not hide the traceback below.

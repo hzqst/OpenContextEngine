@@ -30,7 +30,7 @@ The default mode is not tied to one project. On first access to a project path, 
 
 To use a fixed project, append `"--root", "/absolute/path/to/your-repository"` to `args`. Tool calls may then omit `directory_path`; if provided, it must refer to that same project.
 
-Associated workers exit when the client closes, stdin reaches EOF, or a termination signal arrives. A worker that serves no request for five idle minutes also exits, which releases its repository writer lock for other sessions (`OCE_WORKER_IDLE_SECONDS`; `0` keeps it for the whole session). The next search starts a replacement from the saved index. stdout carries only the MCP protocol; logs go to stderr.
+MCP processes share authenticated repository workers across sessions. When a client closes, stdin reaches EOF, or a termination signal arrives, it releases its leases without stopping workers used by other clients. Five idle minutes also release that client's repository lease (`OCE_WORKER_IDLE_SECONDS`; `0` keeps it for the whole session). Crashed clients stop renewing their leases, which expire after 30 seconds. Workers exit after all leases end and active requests finish. The next search connects to the existing worker or starts a replacement from the saved index. stdout carries only the MCP protocol; shared worker diagnostics go to `worker.log` in the index directory. Different effective model or indexing configurations cannot share a running worker; close its clients before changing settings.
 
 ## Share a repository across clients
 
