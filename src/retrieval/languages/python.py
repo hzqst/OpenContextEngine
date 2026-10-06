@@ -4,20 +4,32 @@ Name-resolved calls/inheritance remain heuristic (shadowing/dynamic dispatch are
 not fully resolved); confidence is a provenance category, not a probability.
 """
 import ast
+import re
 from collections import defaultdict
+from .schema import SourceSyntaxError
+from .python_calls import resolved_links, symbol_resolver
 
 def extract(sources, max_lines=65, options=None):
     if options:
         raise ValueError("Python adapter does not accept language options")
     units, trees, aliases, class_bases = [], {}, {}, {}
+    diagnostics = []
+    scoped_calls = {}
     for source in sources:
         path, text = source.path, source.text
         lines = text.splitlines()
         module = path.removesuffix('.py').replace('/', '.')
         if module.endswith('.__init__'):
             module = module[:-9]
-        tree = ast.parse(text, filename=path)
+        try:
+            tree = ast.parse(text, filename=path)
+        except SyntaxError as error:
+            diagnostics.append({'path': path, 'language': 'python', 'errorType': type(error).__name__,
+                                'line': error.lineno or 1, 'column': error.offset or 1})
+            continue
         trees[module] = tree
+        package = module if path.endswith('/__init__.py') or path == '__init__.py' else module.rpartition('.')[0]
+        scoped_calls[module] = resolved_links(tree, module, package)
         imports = {}
         for n in tree.body:
             if isinstance(n, ast.Import):
@@ -74,9 +86,12 @@ def extract(sources, max_lines=65, options=None):
 
         definitions(tree.body)
 
+    if diagnostics:
+        raise SourceSyntaxError(diagnostics)
     symbols = defaultdict(list)
     for u in units:
         symbols[u['symbol']].append(u['id'])
+    resolve = symbol_resolver(set(trees), symbols)
     for u in units:
         targets, relations = [], []
 
@@ -86,18 +101,13 @@ def extract(sources, max_lines=65, options=None):
                               'resolution': resolution} for target in ids if target != u['id'])
         if u['owner']:
             relate(symbols.get(u['owner'], []), 'member_of', 1.0, 'syntax')
-        for call in u['calls']:
-            pieces = call.split('.')
-            first = pieces[0]
-            target = None
-            if first in ('self', 'cls') and u['owner']:
-                target = u['owner'] + '.' + '.'.join(pieces[1:])
-            elif first in aliases[u['module']]:
-                target = aliases[u['module']][first] + ('.' + '.'.join(pieces[1:]) if len(pieces) > 1 else '')
-            elif len(pieces) == 1:
-                target = u['module'] + '.' + call
-            if target:
-                relate(symbols.get(target, []), 'calls', .7, 'static-name')
+        for kind, links in scoped_calls[u['module']].items():
+            for line, target in links:
+                if u['start'] <= line <= u['end']:
+                    relate(resolve(target), kind, .7, 'scoped-import')
+        for reference in re.findall(r':(?:func|meth):`~?([A-Za-z_][\w.]*)`', u['text']):
+            targets_ = resolve(reference) or resolve(u['module'] + '.' + reference)
+            relate(targets_, 'references_value', .6, 'explicit-doc-reference')
         for base in class_bases.get(u['owner'] or u['symbol'], []):
             pieces = base.split('.')
             target = aliases[u['module']].get(pieces[0], u['module'] + '.' + pieces[0])

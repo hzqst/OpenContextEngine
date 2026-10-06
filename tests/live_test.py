@@ -69,6 +69,27 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(fourth.info['embeddedDocuments'], 0)
         self.assertEqual({unit['path'] for unit in fourth.engine}, {'c.txt'})
 
+    def test_provider_batch_limit_and_cache_reuse(self):
+        for i in range(43):
+            self.write(f'{i}.txt', f'unique document {i}\n')
+        manager = self.manager(embeddingBatchSize=20)
+        sizes = []
+        def embed(url, body, key, timeout):
+            sizes.append(len(body['input']))
+            return self.embed(url, body, key, timeout)
+        manager.embed = embed
+        built = self.build(manager)
+        self.assertEqual(sizes, [20, 20, 3])
+        manager.close()
+        restored = self.manager(embeddingBatchSize=10)
+        self.assertEqual(restored.identity(restored.scan()), built.identity)
+        self.assertEqual(self.build(restored).info['embeddedDocuments'], 0)
+
+    def test_invalid_embedding_batch_size(self):
+        for value in [0, 65, True, 1.5, '20', None]:
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'batch size'):
+                self.manager(embeddingBatchSize=value)
+
     def test_cross_file_relations_refresh_and_units_equal_full_build(self):
         self.write('lib.py','def save():\n    pass\n')
         self.write('main.py','from lib import save\ndef run():\n    save()\n')
@@ -115,17 +136,24 @@ class LiveTests(unittest.TestCase):
         self.assertIsNone(third._restore(third.scan(),third.identity(third.scan())))
         self.assertEqual(self.build(third).info['embeddedDocuments'],1)
 
-    def test_failed_update_preserves_generation_and_blocks_stale_query(self):
+    def test_syntax_fallback_replaces_stale_code_and_recovers(self):
         self.write('a.py','def f():\n    return 1\n')
         manager = self.manager().start()
         first = manager.current(5)
         self.write('a.py','def broken(\n')
+        degraded = manager.current(5)
+        self.assertNotEqual(degraded.identity, first.identity)
+        self.assertEqual(degraded.info['degradedFiles'], 1)
+        self.assertEqual(degraded.engine[0]['text'], 'def broken(')
+        self.assertEqual(degraded.engine[0]['language'], 'text')
         with self.assertRaises(IndexUnavailable):
-            manager.current(5)
-        self.assertEqual(manager.generation.identity,first.identity)
+            manager.verify(first)
         self.write('a.py','def f():\n    return 2\n')
         fixed = manager.current(5)
         self.assertNotEqual(fixed.identity,first.identity)
+        self.assertEqual(fixed.info['degradedFiles'], 0)
+        self.assertEqual(fixed.info['parseDiagnostics'], [])
+        self.assertEqual(fixed.engine[0]['language'], 'python')
         with self.assertRaises(IndexUnavailable):
             manager.verify(first)
 
@@ -153,6 +181,32 @@ class LiveTests(unittest.TestCase):
         self.assertIn('Invalid embedding response indices', logged)
         error = manager.status()['error']
         self.assertEqual((error['type'], error['message']), ('ValueError','Invalid embedding response indices'))
+
+    def test_syntax_diagnostics_survive_parse_cache_and_restart(self):
+        self.write('template.py', 'def <entry_point>():\n    pass\n')
+        manager = self.manager()
+        first = self.build(manager)
+        self.write('settings.txt', 'new file\n')
+        cached = self.build(manager)
+        self.assertEqual(cached.info['parseDiagnostics'], first.info['parseDiagnostics'])
+        manager.close()
+        reopened = self.manager()
+        snapshot = reopened.scan()
+        restored = reopened._restore(snapshot, reopened.identity(snapshot))
+        self.assertEqual(restored.info['parseDiagnostics'], first.info['parseDiagnostics'])
+        (self.root/'template.py').unlink()
+        self.assertEqual(self.build(reopened).info['degradedFiles'], 0)
+
+    def test_embedding_failure_still_blocks_stale_queries(self):
+        self.write('a.py', 'def f():\n    return 1\n')
+        manager = self.manager()
+        first = self.build(manager)
+        manager.embed = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('model unavailable'))
+        self.write('a.py', 'def f():\n    return 2\n')
+        manager.start()
+        with self.assertRaisesRegex(IndexUnavailable, 'RuntimeError'):
+            manager.current(5)
+        self.assertEqual(manager.generation.identity, first.identity)
 
     def test_background_updates_without_query_and_empty_repository(self):
         manager = self.manager().start()

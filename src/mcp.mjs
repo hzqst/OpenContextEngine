@@ -15,7 +15,7 @@ export function createMcpServer(config, {resolveConfig, automatic = false} = {})
   }
   const pathSchema = z.string().min(1).describe('Absolute path to the project directory. Required in automatic workspace mode.');
   const directoryPath = automatic ? pathSchema : pathSchema.optional();
-  const server = new McpServer({name:'open-context-engine',version:'0.1.3'}, {
+  const server = new McpServer({name:'open-context-engine',version:'0.1.4'}, {
     instructions:workspaceInstructions + 'Search for source evidence. Results include source paths and line numbers. '
       + 'Search waits for saved file changes to be indexed. If an update is pending or fails, inspect index_status and retry after it completes. '
       + 'Read target files again before editing, because code may change after a search.',
@@ -35,7 +35,9 @@ export function createMcpServer(config, {resolveConfig, automatic = false} = {})
       lease = await selectConfig(directory_path);
       const result = await search(query,{budget,freshnessWaitMs,config:lease.config,signal:extra.signal});
       if (result.index?.mode !== 'live') throw new Error('This service uses a frozen index; connect to a service started with --root');
-      return {content:[{type:'text',text:result.context || 'No matching source context.'}],structuredContent:result};
+      const warning = result.index.degradedFiles
+        ? `Note: ${result.index.degradedFiles} file(s) indexed as plain text after syntax errors; inspect index_status for paths and locations.\n\n` : '';
+      return {content:[{type:'text',text:warning + (result.context || 'No matching source context.')}],structuredContent:result};
     } catch (error) {
       return {isError:true,content:[{type:'text',text:error.message}]};
     } finally {

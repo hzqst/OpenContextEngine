@@ -32,7 +32,7 @@ open-context-engine setup --python "C:\Program Files\Python312\python.exe"
 
 Use native absolute project paths such as `C:\Users\you\project` in MCP calls. Generated MCP JSON escapes backslashes automatically.
 
-For internal builds, maintainers can create an archive with `npm pack` and install it with `npm install -g /path/to/open-context-engine-0.1.3.tgz`. See the [release checklist](https://github.com/AnnaSuSu/OpenContextEngine/blob/main/docs/RELEASING.md).
+For internal builds, maintainers can create an archive with `npm pack` and install it with `npm install -g /path/to/open-context-engine-0.1.4.tgz`. See the [release checklist](https://github.com/AnnaSuSu/OpenContextEngine/blob/main/docs/RELEASING.md).
 
 The CLI and package are named `open-context-engine`. The previous `opencontextengine` command remains an alias. Existing configuration and cache directories keep their paths, so saved keys and indexes are reused.
 
@@ -59,6 +59,20 @@ RERANK_MODEL=Qwen3-Reranker-4B
 The setup prompt initially suggests `1024` dimensions; replace it with your endpoint's actual output size. The example above uses `2560`.
 
 The embedding service must implement `POST /v1/embeddings`. By default, the reranker uses the ordinary `/rerank` API: requests contain `model`, `query`, `documents`, and `top_n`; responses must return every requested document in `results`, with its original `index` and a finite `relevance_score` between 0 and 1. Results may arrive in relevance order. Set the reranker base URL to the part before `/rerank`: for example, `https://provider.example/v1`, `/v2`, or `https://provider.example` for an unversioned endpoint.
+
+For Alibaba Cloud Model Studio, use its OpenAI-compatible embedding endpoint and select the DashScope rerank format:
+
+```dotenv
+EMBEDDING_BASE_URL=https://YOUR_WORKSPACE.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+EMBEDDING_MODEL=qwen3.7-text-embedding
+OCE_EMBEDDING_DIMENSIONS=1024
+OCE_EMBEDDING_BATCH_SIZE=20
+RERANK_BASE_URL=https://YOUR_WORKSPACE.cn-beijing.maas.aliyuncs.com/api/v1
+RERANK_MODEL=qwen3.7-text-rerank
+OCE_RERANK_API=dashscope
+```
+
+Supply your API key through `EMBEDDING_API_KEY` and `RERANK_API_KEY`, then run setup to save these settings. DashScope mode calls `/services/rerank/text-rerank/text-rerank`, nests the request under `input` and `parameters`, and reads `output.results`. The embedding model defaults to 1024 dimensions and accepts up to 20 texts per request; `OCE_EMBEDDING_BATCH_SIZE` limits index-building batches (default 64, range 1–64). Query embedding uses at most five texts per MCP search. Clear any previous SSH transport overrides when switching to direct HTTPS endpoints. Changing the embedding provider or model rebuilds the index; existing embeddings are retained for reuse with their original configuration.
 
 HTTPS is the default. For an explicitly trusted remote HTTP deployment, set `OCE_ALLOW_HTTP=1` before running `open-context-engine setup`; setup saves this choice in the shared configuration. HTTP transmits API keys and source text without encryption. Local model endpoints remain prohibited. Set `OCE_EMBEDDING_DIMENSIONS` to the service's actual output size (for example, `2560`); changing the provider or dimensions creates a new index generation and does not mix incompatible cached vectors.
 
@@ -106,7 +120,9 @@ If your client already has `open-context-engine` on `PATH`, this shorter equival
 
 Use your client's equivalent configuration format. Configuration and dependency errors go to stderr; MCP stdout is reserved for protocol messages.
 
-Without `--root`, the server uses **automatic workspace mode**. Your agent supplies the absolute project directory in `directory_path` on each tool call. No indexing starts until a project is requested; first access starts a repository worker and background indexing. Later calls reuse it. One MCP session can search multiple projects, each with an independent worker and persistent index. Workers stay active until the client disconnects, when all are stopped.
+Without `--root`, the server uses **automatic workspace mode**. Your agent supplies the absolute project directory in `directory_path` on each tool call. No indexing starts until a project is requested; first access starts a repository worker and background indexing. Later calls reuse it, including calls from other MCP processes under the same local user. One MCP session can search multiple projects, each with an independent worker and persistent index.
+
+Version **0.1.4** and later automatically share one worker per index directory across compatible clients. Closing a client releases only its lease; a worker exits after all leases expire or are released, no searches remain in flight, and it has been idle for 30 seconds. Clients renew their leases automatically, and reconnect if the worker exits.
 
 The server does not infer your editor's project from its own launch directory. Its tool instructions tell the agent to use the project path supplied by the host, or inspect the current project directory. Missing, relative, or invalid paths return an error. Symbolic links to the same directory share a worker. Supply the same project root consistently, rather than a different subdirectory on each call.
 
@@ -158,7 +174,15 @@ Saved files are checked every second by default (`OCE_POLL_SECONDS=1`), with a 3
 
 Search actively checks source hashes before retrieval and again before returning. It waits up to 30 seconds for synchronization (`freshnessWaitMs`, maximum 120 seconds). Failed updates, timeouts, or edits during retrieval produce explicit errors. Unsaved editor buffers are not indexed.
 
+Python, JavaScript, TypeScript, and Go files with syntax errors (including unfilled templates) are indexed as plain text with their original paths and line numbers. Healthy files keep their structural analysis; no structural relations are inferred for degraded files. The index remains `ready`, while `index_status` reports `generation.degradedFiles` and `generation.parseDiagnostics` (path, language, error type, line, column, and fallback mode). Search responses include a degraded-file count and MCP displays a short notice. Diagnostics persist across restarts and disappear when the file is repaired or deleted. Model, toolchain, storage, and source-integrity failures still fail explicitly; stale source is never substituted.
+
 State is stored in `~/.cache/opencontextengine/<repository-path-hash>/`. Override it with `--state /outside/repository/index`: automatic mode creates a separate path-hash subdirectory for each project; fixed `--root` mode uses that exact state directory. Existing installations automatically reuse their previous cache location. One worker may write to a state directory at a time. A client that serves no request for five idle minutes releases its lease (`OCE_WORKER_IDLE_SECONDS`; `0` keeps it for the whole session). Once all leases end and searches finish, the worker exits after 30 idle seconds; the next search connects to an existing worker or starts a replacement from the saved index. Stop all clients and wait for the worker to exit before removing the directory to delete stored source and embeddings.
+
+Automatic mode discovers the writer through an authenticated loopback handshake; concurrent starts keep the existing writer lock intact. Its `worker.json` connection record contains a local access token and is restricted to the current user (POSIX file permissions or a Windows file ACL). Do not share this file.
+
+Configuration and runtime compatibility include model credentials, endpoints, language options, and worker source. Incompatible clients receive an explicit error instead of silently adopting another configuration; close the existing clients before changing settings, or select a separate `--state` directory. An older or manually started worker cannot be adopted automatically: use `--connect` or stop its owning clients before switching to automatic sharing.
+
+Searches are serialized with a bounded queue of 16 active/waiting requests and a 30-second queue wait; saturation returns a retryable busy error.
 
 When model weights change under the same name, increment `OCE_EMBEDDING_REVISION`. A different provider, model name, or dimension count also invalidates vector reuse. Other models need separate compatibility and quality validation.
 

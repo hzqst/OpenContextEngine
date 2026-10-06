@@ -55,11 +55,14 @@ test('Live HTTP search synchronizes saved files and rejects unauthorized/invalid
       body:JSON.stringify({query:'q',freshnessWaitMs:-1})});
     assert.equal(invalid.status,422);
     await writeFile(join(root,'main.py'),'def broken(\n');
-    // The failure names its reason, not only the fact that the index is unavailable.
-    await assert.rejects(search('find save',{config,freshnessWaitMs:5000}),/Index unavailable: Index update failed: SyntaxError: /);
+    const fallback = await search('find broken',{config,freshnessWaitMs:5000});
+    assert.match(fallback.context,/def broken\(/);
+    assert.doesNotMatch(fallback.context,/second/);
+    assert.equal(fallback.index.degradedFiles,1);
     await rm(join(root,'main.py'));
     const empty = await search('find save',{config,freshnessWaitMs:5000});
     assert.equal(empty.context,'');
+    assert.equal(empty.index.degradedFiles,0);
   });
 
 test('Live HTTP refuses results if source changes during model retrieval',

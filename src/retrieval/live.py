@@ -19,7 +19,7 @@ import numpy as np
 from engine import document, post
 from languages import adapter_manifest, source_units
 from languages.files import discover_snapshot, normalize_suffixes
-from routed import RoutedEngine
+from evidence import EvidenceEngine
 from writer_lock import acquire_writer_lock
 
 
@@ -49,7 +49,7 @@ class Generation:
 
 
 class LiveIndex:
-    def __init__(self, config, *, embed=post, engine_factory=RoutedEngine):
+    def __init__(self, config, *, embed=post, engine_factory=EvidenceEngine):
         self.config = config
         self.root = Path(config['root']).resolve()
         self.state = Path(config['state']).resolve()
@@ -73,6 +73,9 @@ class LiveIndex:
         self.dimensions = self.embedding['dimensions']
         if type(self.dimensions) is not int or not 1 <= self.dimensions <= 65536:
             raise ValueError('Invalid embedding dimensions')
+        self.batch_size = config.get('embeddingBatchSize', 64)
+        if type(self.batch_size) is not int or not 1 <= self.batch_size <= 64:
+            raise ValueError('Embedding batch size must be an integer from 1 to 64')
         self.embed, self.engine_factory = embed, engine_factory
         self.condition = threading.Condition()
         self.stop_event = threading.Event()
@@ -176,8 +179,9 @@ class LiveIndex:
 
     def _build(self, snapshot, identity):
         start = time.monotonic()
+        report = {}
         units = source_units(self.root, snapshot['files'], language_options=self.options,
-                             cache=self.parse_cache, exclude_suffixes=self.exclude_suffixes)
+                             cache=self.parse_cache, report=report, exclude_suffixes=self.exclude_suffixes)
         documents = [document(unit) for unit in units]
         keys = [digest([self.embedding, text]) for text in documents]
         vectors, missing = {}, {}
@@ -192,10 +196,10 @@ class LiveIndex:
                         continue
                 missing[key] = text
             entries = list(missing.items())
-            for offset in range(0, len(entries), 64):
+            for offset in range(0, len(entries), self.batch_size):
                 if self.stop_event.is_set():
                     raise SourceChanged()
-                batch = entries[offset:offset+64]
+                batch = entries[offset:offset+self.batch_size]
                 result = self.embed(self.config['embeddingUrl']+'/embeddings',
                     {'model': self.embedding['model'], 'input': [text for _, text in batch]},
                     self.config.get('embeddingKey', 'local-only'), timeout=60)
@@ -220,6 +224,7 @@ class LiveIndex:
                 'changedFiles': sum(previous.get(path) != sha for path, sha in now.items()),
                 'deletedFiles': len(previous.keys() - now.keys()), 'embedding': self.embedding,
                 'languageUnits': dict(Counter(unit['language'] for unit in units)),
+                'degradedFiles': report['degradedFiles'], 'parseDiagnostics': report['parseDiagnostics'],
                 'indexingMs': round((time.monotonic()-start)*1000), 'completedAt': time.time()}
         folder = self.state/('generation-'+uuid.uuid4().hex)
         folder.mkdir(mode=0o700)
