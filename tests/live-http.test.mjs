@@ -13,17 +13,16 @@ test('A missing worker executable fails startup and closes without hanging', {ti
   await worker.close();
 });
 
-test('A worker that dies before listening reports its stderr tail instead of an exit code alone', {timeout:5000}, async () => {
+test('A worker that dies before listening reports its exit code', {timeout:5000}, async () => {
   const worker = startService({python:process.execPath,config:{}},{log:()=>{}});
   await assert.rejects(worker.ready,error => {
     assert.match(error.message,/Retrieval worker exited \(1\)/);
-    assert.match(error.message,/Worker stderr:\n\s*\S/); // The tail names the real cause.
     return true;
   });
   await worker.close();
 });
 
-test('A worker that rejects its configuration reports the reason, not just the exit code',
+test('A worker that rejects its configuration reports the structured startup failure',
   {skip:!python,timeout:15000}, async t => {
     const dir = await mkdtemp(join(tmpdir(),'oce-startup-failure-'));
     t.after(() => rm(dir,{recursive:true,force:true}));
@@ -34,7 +33,7 @@ test('A worker that rejects its configuration reports the reason, not just the e
       embeddingIdentity:'https://test-model.invalid/v1',embeddingKey:'test-only',
       reranker:{baseUrl:'http://127.0.0.1:1/v1'},pollSeconds:.05,debounceSeconds:0,
       excludeSuffixes:['md']}},{log:()=>{}});
-    await assert.rejects(worker.ready,/Invalid OCE_EXCLUDE_SUFFIXES entry: md/);
+    await assert.rejects(worker.ready,{code:'STARTUP_FAILED',message:'Retrieval worker failed to start: ValueError'});
     await worker.close();
   });
 
@@ -87,4 +86,24 @@ test('Managed workers can parse JavaScript when the desktop client PATH does not
     await writeFile(join(service.root,'store.js'),'export function persist() { return "desktop-path-ready"; }\n');
     const result = await search('find persist',{config:service.config,freshnessWaitMs:5000});
     assert.match(result.context,/desktop-path-ready/);
+  });
+
+test('A concurrent search can queue longer than five seconds behind model retrieval',
+  {skip:!python, timeout:20000}, async t => {
+    const {root,config,hooks} = await fixture(t);
+    await writeFile(join(root, 'main.py'), 'def persist():\n    return "queued_result"\n');
+    let entered;
+    const started = new Promise(resolve => {entered = resolve;});
+    hooks.rerank = async () => {
+      hooks.rerank = null;
+      entered();
+      await new Promise(resolve => setTimeout(resolve, 5500));
+    };
+    const first = search('find persist', {config, freshnessWaitMs:5000});
+    await started;
+    const second = search('find persist', {config, freshnessWaitMs:5000});
+    const [a, b] = await Promise.all([first, second]);
+    assert.match(a.context, /queued_result/);
+    assert.match(b.context, /queued_result/);
+    assert.ok(b.queueMs >= 5000, b.queueMs);
   });

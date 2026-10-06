@@ -30,11 +30,11 @@ The default mode is not tied to one project. On first access to a project path, 
 
 To use a fixed project, append `"--root", "/absolute/path/to/your-repository"` to `args`. Tool calls may then omit `directory_path`; if provided, it must refer to that same project.
 
-MCP processes share authenticated repository workers across sessions. When a client closes, stdin reaches EOF, or a termination signal arrives, it releases its leases without stopping workers used by other clients. Five idle minutes also release that client's repository lease (`OCE_WORKER_IDLE_SECONDS`; `0` keeps it for the whole session). Crashed clients stop renewing their leases, which expire after 30 seconds. Workers exit after all leases end and active requests finish. The next search connects to the existing worker or starts a replacement from the saved index. stdout carries only the MCP protocol; shared worker diagnostics go to `worker.log` in the index directory. Different effective model or indexing configurations cannot share a running worker; close its clients before changing settings.
+MCP processes share authenticated repository workers across sessions. When a client closes, stdin reaches EOF, or a termination signal arrives, it releases its leases without stopping workers used by other clients. Five idle minutes also release that client's repository lease (`OCE_WORKER_IDLE_SECONDS`; `0` keeps it for the whole session). Crashed clients stop renewing their leases, which expire after 15 seconds. Workers exit after all leases end and active searches finish, followed by 30 idle seconds. The next search connects to the existing worker or starts a replacement from the saved index. stdout carries only the MCP protocol. Shared workers detach their stdout/stderr after startup; startup errors use structured codes and safe diagnostics. Different effective model, indexing or runtime configurations cannot share a running worker; close its clients before changing settings.
 
 ## Share a repository across clients
 
-This is an optional setup for source installations. An index directory permits only one writer. To let multiple clients search the same repository simultaneously, start a separate persistent service from the OpenContextEngine source directory:
+Automatic mode already shares workers across clients. To manage a separate persistent service explicitly, start it from the OpenContextEngine source directory:
 
 ```sh
 # Set OCE_API_KEY in .env to at least 24 characters.

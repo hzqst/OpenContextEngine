@@ -158,7 +158,7 @@ Saved files are checked every second by default (`OCE_POLL_SECONDS=1`), with a 3
 
 Search actively checks source hashes before retrieval and again before returning. It waits up to 30 seconds for synchronization (`freshnessWaitMs`, maximum 120 seconds). Failed updates, timeouts, or edits during retrieval produce explicit errors. Unsaved editor buffers are not indexed.
 
-State is stored in `~/.cache/opencontextengine/<repository-path-hash>/`. Override it with `--state /outside/repository/index`: automatic mode creates a separate path-hash subdirectory for each project; fixed `--root` mode uses that exact state directory. Existing installations automatically reuse their previous cache location. One worker may write to a state directory at a time. A worker that serves no request for five idle minutes exits and releases that lock (`OCE_WORKER_IDLE_SECONDS`; `0` keeps it for the whole session); the next search starts a replacement from the saved index. Stop that worker and remove the directory to delete stored source and embeddings.
+State is stored in `~/.cache/opencontextengine/<repository-path-hash>/`. Override it with `--state /outside/repository/index`: automatic mode creates a separate path-hash subdirectory for each project; fixed `--root` mode uses that exact state directory. Existing installations automatically reuse their previous cache location. One worker may write to a state directory at a time. A client that serves no request for five idle minutes releases its lease (`OCE_WORKER_IDLE_SECONDS`; `0` keeps it for the whole session). Once all leases end and searches finish, the worker exits after 30 idle seconds; the next search connects to an existing worker or starts a replacement from the saved index. Stop all clients and wait for the worker to exit before removing the directory to delete stored source and embeddings.
 
 When model weights change under the same name, increment `OCE_EMBEDDING_REVISION`. A different provider, model name, or dimension count also invalidates vector reuse. Other models need separate compatibility and quality validation.
 
@@ -166,7 +166,9 @@ Optional Go type analysis can be enabled with `OCE_LANGUAGE_OPTIONS='{"go":{"mod
 
 ## Share one worker across clients
 
-This optional source-installation workflow shares a running worker, in addition to the shared model configuration available to all CLI installations. Set an `OCE_API_KEY` of at least 24 characters in the environment, then run from the checkout:
+Automatic MCP mode shares one authenticated loopback worker for the same canonical project and state directory across clients. Compatible clients attach through private discovery records, and closing one client does not stop another client's worker. Crashed clients lose their leases after 15 seconds. Configuration and runtime fingerprints prevent incompatible model settings or code versions from sharing a writer. After an upgrade, close clients using older workers before reopening them; never delete a live writer's lock. Searches use a bounded queue and return an actionable busy error when it fills.
+
+For an explicitly managed service, set an `OCE_API_KEY` of at least 24 characters in the environment, then run from the checkout:
 
 ```sh
 npm run serve-retrieval -- --root /absolute/path/to/your-repository --port 23505

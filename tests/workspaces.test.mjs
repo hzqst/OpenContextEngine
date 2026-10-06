@@ -23,7 +23,7 @@ async function setup(t, options = {}) {
     start: settings => {
       const child = new EventEmitter();
       const worker = {child, settings, closes:0, ready:options.ready?.(started.length) ?? Promise.resolve({root:settings.root}),
-        ...(options.check ? {check:() => options.check(worker)} : {}),
+        ...(options.get ? {get:() => options.get(worker)} : {}),
         async close() {
           this.closes++;
           if (options.closeGate) await options.closeGate(this);
@@ -155,16 +155,15 @@ test('The idle window comes from the shared settings and rejects unusable values
     /OCE_WORKER_IDLE_SECONDS must be zero or a positive number of seconds/);
 });
 
-test('A dead shared worker is replaced on the next request without waiting for a heartbeat', async t => {
-  let dead;
-  const {manager,started,first} = await setup(t,{check:worker => {
-    if (worker === dead) throw new Error('connection refused');
-  }});
-  (await manager.get(first)).release();
-  dead = started[0];
+test('Workspace requests use the shared handle connection after it reconnects', async t => {
+  let connection = {baseUrl:'original'};
+  const {manager,started,first} = await setup(t,{get:() => connection});
+  const original = await manager.get(first);
+  assert.equal(connection,original.config);
+  original.release();
+  connection = {baseUrl:'replacement'};
   const recovered = await manager.get(first);
-  assert.equal(2,started.length);
-  assert.equal(1,dead.closes);
-  assert.equal(first,recovered.config.root);
+  assert.equal(1,started.length);
+  assert.equal(connection,recovered.config);
   recovered.release();
 });

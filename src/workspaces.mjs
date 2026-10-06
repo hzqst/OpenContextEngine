@@ -1,7 +1,8 @@
 import { realpathSync, statSync } from 'node:fs';
 import { isAbsolute, resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { serviceConfig, startSharedService } from './service.mjs';
+import { serviceConfig } from './service.mjs';
+import { startSharedService } from './shared-service.mjs';
 import { loadEnvironment } from './config.mjs';
 
 // A failed worker start repeats identically, so retrying every call only spawns doomed processes.
@@ -72,19 +73,6 @@ export function createWorkspaceManager({root, state} = {}, {configure = serviceC
       failures.delete(repository);
     }
     let entry = workers.get(repository);
-    if (entry?.started && entry.worker.check) {
-      const checking = entry;
-      checking.leases++;
-      try {await entry.worker.check();} catch {
-        if (workers.get(repository) === entry) workers.delete(repository);
-        await entry.worker.close();
-        entry = workers.get(repository);
-      } finally {
-        checking.leases--;
-        checking.idleSince = now();
-      }
-      if (closing) throw new Error('MCP workspace manager is shutting down');
-    }
     if (!entry) {
       const workspaceState = state && (fixedRoot ? state : join(resolve(state),
         createHash('sha256').update(repository).digest('hex').slice(0, 24)));
@@ -92,8 +80,8 @@ export function createWorkspaceManager({root, state} = {}, {configure = serviceC
       entry = {worker, leases:0, idleSince:now()};
       workers.set(repository, entry);
       const remove = () => {if (workers.get(repository) === entry) workers.delete(repository);};
-      worker.child.once('exit', remove);
-      entry.ready = worker.ready.then(config => {entry.started = true; return config;}).catch(async error => {
+      worker.child?.once('exit', remove);
+      entry.ready = worker.ready.catch(async error => {
         failures.set(repository, {at:now(), message:error.message});
         try {await worker.close();} finally {remove();}
         throw error;
@@ -102,7 +90,9 @@ export function createWorkspaceManager({root, state} = {}, {configure = serviceC
     // The lease spans the caller's request, so reclamation cannot stop a worker mid-search.
     entry.leases++;
     try {
-      return {config:await entry.ready, release:lease(entry)};
+      await entry.ready;
+      const config = entry.worker.get ? await entry.worker.get() : await entry.ready;
+      return {config, release:lease(entry)};
     } catch (error) {
       entry.leases--;
       entry.idleSince = now();

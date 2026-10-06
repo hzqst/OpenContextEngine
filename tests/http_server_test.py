@@ -37,7 +37,6 @@ class StartupFailureTests(unittest.TestCase):
             failed = subprocess.run([sys.executable,str(SOURCE)],input=json.dumps(config)+'\n',
                                     capture_output=True,encoding='utf-8')
             self.assertEqual(failed.returncode,1)
-            # The launcher reports an exit code alone, so the worker names the reason itself.
-            self.assertEqual(json.loads(failed.stdout.strip())['error'],
-                             'ValueError: Invalid OCE_EXCLUDE_SUFFIXES entry: md')
-            self.assertIn('ValueError',failed.stderr)
+            self.assertEqual({'code':'STARTUP_FAILED','message':'ValueError'},
+                             json.loads(failed.stdout.strip())['startupError'])
+            self.assertEqual('',failed.stderr)

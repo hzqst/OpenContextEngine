@@ -18,6 +18,10 @@ else:
         fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+class WriterBusy(ValueError):
+    pass
+
+
 def owner_path(path):
     return path.with_name(path.name + '.owner')
 
@@ -47,6 +51,6 @@ def acquire_writer_lock(path):
         lock(file)
     except OSError:
         file.close()
-        raise ValueError(f'This index directory already has a running writer{holder(path)}: {path}') from None
+        raise WriterBusy(f'This index directory already has a running writer{holder(path)}: {path}') from None
     record_owner(path)
     return file
