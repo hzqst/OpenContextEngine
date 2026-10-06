@@ -176,7 +176,7 @@ Search actively checks source hashes before retrieval and again before returning
 
 Python, JavaScript, TypeScript, and Go files with syntax errors (including unfilled templates) are indexed as plain text with their original paths and line numbers. Healthy files keep their structural analysis; no structural relations are inferred for degraded files. The index remains `ready`, while `index_status` reports `generation.degradedFiles` and `generation.parseDiagnostics` (path, language, error type, line, column, and fallback mode). Search responses include a degraded-file count and MCP displays a short notice. Diagnostics persist across restarts and disappear when the file is repaired or deleted. Model, toolchain, storage, and source-integrity failures still fail explicitly; stale source is never substituted.
 
-State is stored in `~/.cache/opencontextengine/<repository-path-hash>/`. Override it with `--state /outside/repository/index`: automatic mode creates a separate path-hash subdirectory for each project; fixed `--root` mode uses that exact state directory. Existing installations automatically reuse their previous cache location. One worker may write to a state directory at a time. Stop the worker and remove the directory to delete stored source and embeddings.
+State is stored in `~/.cache/opencontextengine/<repository-path-hash>/`. Override it with `--state /outside/repository/index`: automatic mode creates a separate path-hash subdirectory for each project; fixed `--root` mode uses that exact state directory. Existing installations automatically reuse their previous cache location. One worker may write to a state directory at a time. A client that serves no request for five idle minutes releases its lease (`OCE_WORKER_IDLE_SECONDS`; `0` keeps it for the whole session). Once all leases end and searches finish, the worker exits after 30 idle seconds; the next search connects to an existing worker or starts a replacement from the saved index. Stop all clients and wait for the worker to exit before removing the directory to delete stored source and embeddings.
 
 Automatic mode discovers the writer through an authenticated loopback handshake; concurrent starts keep the existing writer lock intact. Its `worker.json` connection record contains a local access token and is restricted to the current user (POSIX file permissions or a Windows file ACL). Do not share this file.
 
@@ -186,11 +186,13 @@ Searches are serialized with a bounded queue of 16 active/waiting requests and a
 
 When model weights change under the same name, increment `OCE_EMBEDDING_REVISION`. A different provider, model name, or dimension count also invalidates vector reuse. Other models need separate compatibility and quality validation.
 
-Optional Go type analysis can be enabled with `OCE_LANGUAGE_OPTIONS='{"go":{"mode":"types"}}'`; the default uses syntax-based analysis. `OCE_PYTHON` selects an existing Python environment with the required dependencies; normal CLI installations use the runtime created by setup.
+Optional Go type analysis can be enabled with `OCE_LANGUAGE_OPTIONS='{"go":{"mode":"types"}}'`; the default uses syntax-based analysis. `OCE_EXCLUDE_SUFFIXES=.md,.mdx` keeps those file endings out of the index; documentation is indexed as text chunks by default. `OCE_PYTHON` selects an existing Python environment with the required dependencies; normal CLI installations use the runtime created by setup.
 
 ## Share one worker across clients
 
-This optional source-installation workflow shares a running worker, in addition to the shared model configuration available to all CLI installations. Set an `OCE_API_KEY` of at least 24 characters in the environment, then run from the checkout:
+Automatic MCP mode shares one authenticated loopback worker for the same canonical project and state directory across clients. Compatible clients attach through private discovery records, and closing one client does not stop another client's worker. Crashed clients lose their leases after 15 seconds. Configuration and runtime fingerprints prevent incompatible model settings or code versions from sharing a writer. After an upgrade, close clients using older workers before reopening them; never delete a live writer's lock. Searches use a bounded queue and return an actionable busy error when it fills.
+
+For an explicitly managed service, set an `OCE_API_KEY` of at least 24 characters in the environment, then run from the checkout:
 
 ```sh
 npm run serve-retrieval -- --root /absolute/path/to/your-repository --port 23505

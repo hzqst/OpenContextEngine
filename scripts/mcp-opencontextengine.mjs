@@ -27,7 +27,7 @@ try {
     server = createMcpServer(clientConfig());
   } else {
     workspaces = createWorkspaceManager(values);
-    if (values.root) await workspaces.get();
+    if (values.root) (await workspaces.get()).release();
     if (!stopping) server = createMcpServer(undefined, {resolveConfig:workspaces.get, automatic:!values.root});
   }
   if (!stopping) await server.connect(new StdioServerTransport());

@@ -1,4 +1,6 @@
 """Single-writer exclusion and release across operating systems and processes."""
+import json
+import os
 from pathlib import Path
 import runpy
 import subprocess
@@ -21,14 +23,23 @@ class WriterLockTests(unittest.TestCase):
                 'acquire_writer_lock(Path(sys.argv[1])).close()')
         with tempfile.TemporaryDirectory(prefix='oce lock 中文 ') as directory:
             path = Path(directory)/'writer.lock'
+            owner = path.with_name('writer.lock.owner')
             with acquire_writer_lock(path):
                 contender = subprocess.run([sys.executable,'-c',code,str(path)],
                                            capture_output=True,encoding='utf-8')
                 self.assertNotEqual(contender.returncode,0)
                 self.assertIn('running writer',contender.stderr)
+                # The contention message names the live holder, which the loser must not overwrite.
+                self.assertIn(f'pid {os.getpid()}',contender.stderr)
+                self.assertIn('holding since',contender.stderr)
+                recorded = json.loads(owner.read_text(encoding='utf-8'))
+                self.assertEqual(recorded['pid'],os.getpid())
+                self.assertTrue(recorded['acquiredAt'])
             released = subprocess.run([sys.executable,'-c',code,str(path)],
                                       capture_output=True,encoding='utf-8')
             self.assertEqual(released.returncode,0,released.stderr)
+            # The next writer replaces the record instead of inheriting it.
+            self.assertNotEqual(json.loads(owner.read_text(encoding='utf-8'))['pid'],os.getpid())
 
     def test_windows_uses_nonblocking_byte_zero_and_closes_on_contention(self):
         calls = []

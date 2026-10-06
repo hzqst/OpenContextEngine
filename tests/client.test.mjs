@@ -23,6 +23,7 @@ test('Retrieval client permits SSH loopback or HTTPS, rejects credentials and cl
       OCE_RERANK_API:'rerank',OCE_RERANK_CONCURRENCY:'3',OCE_RERANK_MAX_DOCUMENTS:'64',
       [prefix+'PYTHON']:'/test/python',[prefix+'GO_BINARY']:'/test/go',
       [prefix+'API_KEY']:'configuration-test-only',[prefix+'POLL_SECONDS']:'2',
+      [prefix+'EXCLUDE_SUFFIXES']:' .MD ,.mdx ,',
     });
     assert.equal(settings.python,'/test/python');
     assert.equal(settings.workerEnv.OCE_GO_BINARY,'/test/go');
@@ -31,7 +32,12 @@ test('Retrieval client permits SSH loopback or HTTPS, rejects credentials and cl
     assert.equal(settings.config.reranker.api,'rerank');
     assert.equal(settings.config.reranker.concurrency,3);
     assert.equal(settings.config.reranker.maxDocuments,64);
+    assert.deepEqual(settings.config.excludeSuffixes,['.MD','.mdx']);
   }
+  const defaults=serviceConfig({root:'.'}, {OCE_CONFIG_HOME:configHome,
+    EMBEDDING_BASE_URL:'https://embedding.example/v1',RERANK_BASE_URL:'https://reranker.example/v1',
+    RERANK_MODEL:'test',RERANK_API_KEY:'test-only'});
+  assert.deepEqual(defaults.config.excludeSuffixes,[]);
   for(const url of ['http://public.example.com','https://user:pass@example.com','https://example.com?token=x']){
     assert.throws(()=>clientConfig({...env,OCE_BASE_URL:url}));
   }

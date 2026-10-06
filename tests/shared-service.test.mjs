@@ -119,7 +119,11 @@ test('A shared writer survives its launcher closing the startup pipe before read
       body:JSON.stringify({instanceId:info.instanceId, fingerprint:'test', leaseId:'survivor'}),
     });
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).pid, child.pid);
+    // Windows virtual environments may launch the interpreter through a redirector
+    // with a different PID. Discovery identifies the actual writer process.
+    const attached = await response.json();
+    assert.equal(info.pid, attached.pid);
+    assert.equal(info.instanceId, attached.instanceId);
   });
 
 test('An older private worker retains its lock and gets an actionable error instead of being killed',

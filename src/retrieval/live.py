@@ -8,21 +8,28 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import threading
 import time
+import traceback
 import uuid
 
 import numpy as np
 
 from engine import document, post
 from languages import adapter_manifest, source_units
-from languages.files import discover_snapshot
+from languages.files import discover_snapshot, normalize_suffixes
 from evidence import EvidenceEngine
 from writer_lock import acquire_writer_lock
 
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def failure_text(kind, message=''):
+    """Name a failure with its reason; a bare exception type is not actionable."""
+    return f'{kind}: {message}' if message else kind
 
 
 class IndexUnavailable(Exception):
@@ -51,6 +58,8 @@ class LiveIndex:
         if self.state.is_relative_to(self.root):
             raise ValueError('Live index state must be outside the repository root')
         self.options = config.get('languageOptions', {})
+        # Validated before the writer lock so an unusable configuration fails fast.
+        self.exclude_suffixes = normalize_suffixes(config.get('excludeSuffixes'))
         self.poll = float(config.get('pollSeconds', 1))
         self.debounce = float(config.get('debounceSeconds', .3))
         if not .05 <= self.poll <= 60 or not 0 <= self.debounce <= 10:
@@ -72,6 +81,7 @@ class LiveIndex:
         self.stop_event = threading.Event()
         self.generation = None
         self.error = None
+        self.reported_failure = None
         self.phase = 'starting'
         self.parse_cache = {}
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -79,8 +89,10 @@ class LiveIndex:
         self.thread = threading.Thread(target=self._run, name='repository-index', daemon=True)
 
     def scan(self):
-        snapshot = discover_snapshot(self.root)
+        snapshot = discover_snapshot(self.root, self.exclude_suffixes)
         # Ignore diagnostic exclusions and mtime: identities bind actual inputs.
+        # Configured suffix exclusions reach the identity through this file list,
+        # so a policy that removes nothing leaves an existing index untouched.
         snapshot = {'files': [{'path': f['path'], 'sha256': f['sha256']} for f in snapshot['files']],
                     'languageOptions': self.options}
         return snapshot
@@ -117,12 +129,12 @@ class LiveIndex:
             try:
                 target = self.identity(self.scan())
             except (OSError, ValueError) as error:
-                raise IndexUnavailable('Cannot read current source: ' + type(error).__name__) from None
+                raise IndexUnavailable('Cannot read current source: ' + failure_text(type(error).__name__, str(error))) from None
             with self.condition:
                 if self.generation and self.generation.identity == target:
                     return self.generation
                 if self.error and self.error['identity'] == target:
-                    raise IndexUnavailable('Index update failed: ' + self.error['type'])
+                    raise IndexUnavailable('Index update failed: ' + failure_text(self.error['type'], self.error['message']))
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise IndexUnavailable('Index update pending; retry after synchronization')
@@ -169,7 +181,7 @@ class LiveIndex:
         start = time.monotonic()
         report = {}
         units = source_units(self.root, snapshot['files'], language_options=self.options,
-                             cache=self.parse_cache, report=report)
+                             cache=self.parse_cache, report=report, exclude_suffixes=self.exclude_suffixes)
         documents = [document(unit) for unit in units]
         keys = [digest([self.embedding, text]) for text in documents]
         vectors, missing = {}, {}
@@ -232,6 +244,16 @@ class LiveIndex:
                 shutil.rmtree(old)
         return Generation(identity, snapshot, info, engine)
 
+    def _report(self, error, identity):
+        """Record a failed update with its reason, then log one traceback per failing source state."""
+        with self.condition:
+            self.phase = 'failed'
+            self.error = {'identity': identity, 'type': type(error).__name__, 'message': str(error)}
+            self.condition.notify_all()
+        if identity != self.reported_failure:
+            self.reported_failure = identity
+            traceback.print_exception(error)  # stderr reaches the launcher's log, not the client
+
     def _run(self):
         failed_identity, retry_at = None, 0
         try:
@@ -259,16 +281,13 @@ class LiveIndex:
                         raise SourceChanged()
                     with self.condition:
                         self.generation, self.phase, self.error = generation, 'ready', None
-                        failed_identity = None
+                        failed_identity, self.reported_failure = None, None
                         self.condition.notify_all()
                 except SourceChanged:
                     continue
                 except Exception as error:
                     failed_identity, retry_at = identity, time.monotonic() + max(2, self.poll)
-                    with self.condition:
-                        self.phase = 'failed'
-                        self.error = {'identity': identity, 'type': type(error).__name__}
-                        self.condition.notify_all()
+                    self._report(error, identity)
                     self.stop_event.wait(self.poll)
         finally:
             self.lock_file.close()
