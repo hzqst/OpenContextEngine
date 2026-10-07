@@ -10,7 +10,7 @@ export function clientConfig(environment=process.env) {
   return {baseUrl:url.href.replace(/\/$/,''),apiKey};
 }
 
-export async function search(query,{budget=4000,trace=false,freshnessWaitMs=30000,config=clientConfig(),signal}={}) {
+export async function search(query,{budget=8000,trace=false,freshnessWaitMs=30000,config=clientConfig(),signal}={}) {
   const started=performance.now();
   const timeout = AbortSignal.timeout(freshnessWaitMs + 60000);
   const response=await fetch(`${config.baseUrl}/search`,{method:'POST',redirect:'error',signal:signal ? AbortSignal.any([signal,timeout]) : timeout,
@@ -18,7 +18,9 @@ export async function search(query,{budget=4000,trace=false,freshnessWaitMs=3000
   if (!response.ok) {
     if (response.status === 503) {
       const body = await response.json();
-      throw new Error(`Index unavailable: ${body.error || 'update pending'}`);
+      throw Object.assign(new Error(`Index unavailable: ${body.error || 'update pending'}`), {
+        code:body.code, index:body.index,
+      });
     }
     if (response.status === 429) {
       const body = await response.json();

@@ -105,7 +105,7 @@ def serve(config):
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body,dict) or set(body)-{'query','budget','trace','freshnessWaitMs'}:
                     raise ValueError('Unknown fields')
-                query,budget = body.get('query'),body.get('budget',4000)
+                query,budget = body.get('query'),body.get('budget',8000)
                 wait_ms = body.get('freshnessWaitMs', 30000)
                 if type(wait_ms) is not int or not 0 <= wait_ms <= 120000:
                     raise ValueError('Invalid freshness wait')
@@ -144,7 +144,8 @@ def serve(config):
                     response['diagnostics'] = debug
                 self.reply(200,response)
             except IndexUnavailable as error:
-                self.reply(503,{'error':str(error),'index':live.status()})
+                self.reply(503,{'error':str(error),'code':error.code,
+                               'retryable':error.code == 'INDEX_UPDATING','index':live.status()})
             except Exception as error:
                 print(json.dumps({'event':'search-failed','type':type(error).__name__}),flush=True)
                 self.reply(502,{'error':'Retrieval or model request failed'})
