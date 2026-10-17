@@ -6,6 +6,7 @@ import { join, dirname, delimiter } from 'node:path';
 import { loadEnvironment, readUserConfig, saveUserConfig } from '../src/config.mjs';
 import { ensureRuntime, defaultPython, venvPython, pythonInvocation } from '../src/runtime.mjs';
 import { setup, validateModels } from '../src/setup.mjs';
+import { serviceConfig } from '../src/service.mjs';
 
 const models = {EMBEDDING_BASE_URL:'https://embedding.example/v1',EMBEDDING_API_KEY:'embedding-test-secret',
   EMBEDDING_MODEL:'embedding-test',OCE_EMBEDDING_DIMENSIONS:'1024',RERANK_BASE_URL:'https://rerank.example/v1',
@@ -43,11 +44,34 @@ test('Provider embedding batch size is validated and preserved in shared config'
     assert.throws(() => validateModels({...models,OCE_EMBEDDING_BATCH_SIZE:value}),/batch size/);
   }
 });
+test('Embedding concurrency defaults to serial and validates saved settings', async t => {
+  const {environment} = await temporary(t);
+  assert.doesNotThrow(() => validateModels(models));
+  for (const value of ['1','2','8']) {
+    const configured = {...models,OCE_EMBEDDING_CONCURRENCY:value};
+    assert.doesNotThrow(() => validateModels(configured));
+    saveUserConfig(configured,environment);
+    assert.equal(readUserConfig(environment).OCE_EMBEDDING_CONCURRENCY,value);
+  }
+  for (const value of ['0','9','NaN','1.5','']) {
+    assert.throws(() => validateModels({...models,OCE_EMBEDDING_CONCURRENCY:value}),/concurrency/);
+  }
+});
 async function temporary(t) {
   const dir = await mkdtemp(join(tmpdir(),'oce-setup-'));
   t.after(() => rm(dir,{recursive:true,force:true}));
   return {dir,environment:{OCE_CONFIG_HOME:join(dir,'config')}};
 }
+
+test('Custom shared index directory survives saved config and reaches worker settings', async t => {
+  const {dir,environment} = await temporary(t);
+  const shared = join(dir,'shared index 中文');
+  saveUserConfig({...models,OCE_SHARED_INDEX_DIRECTORY:shared},environment);
+  assert.equal(readUserConfig(environment).OCE_SHARED_INDEX_DIRECTORY,shared);
+  assert.equal(serviceConfig({root:dir,state:join(dir,'state')},environment).config.sharedIndexDirectory,shared);
+  const override = join(dir,'override');
+  assert.equal(serviceConfig({root:dir},{...environment,OCE_SHARED_INDEX_DIRECTORY:override}).config.sharedIndexDirectory,override);
+});
 
 test('Shared config uses private atomic files and explicit environment wins over saved settings and checkout defaults', async t => {
   const {dir,environment} = await temporary(t);

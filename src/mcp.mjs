@@ -25,6 +25,7 @@ export function createMcpServer(config, {resolveConfig, automatic = false} = {})
     ? 'Pass directory_path as the absolute directory of the project the user is working on with every tool call. '
       + 'Use the workspace path supplied by your host or inspect the current project directory; do not guess it. '
       + 'A new project is indexed on first access. The same server can search multiple projects independently. '
+      + 'Overlapping projects reuse cached code text and embeddings while keeping their own search scope. '
     : 'This server searches one configured repository. ';
   async function selectConfig(directoryPath) {
     if (resolveConfig) return resolveConfig(directoryPath);
@@ -33,7 +34,7 @@ export function createMcpServer(config, {resolveConfig, automatic = false} = {})
   }
   const pathSchema = z.string().min(1).describe('Absolute path to the project directory. Required in automatic workspace mode.');
   const directoryPath = automatic ? pathSchema : pathSchema.optional();
-  const server = new McpServer({name:'open-context-engine',version:'0.1.7'}, {
+  const server = new McpServer({name:'open-context-engine',version:'0.1.10'}, {
     instructions:workspaceInstructions + 'Search for source evidence. Results include source paths and line numbers. '
       + 'Search waits for saved file changes and retries a pending update once. A status of updating means search has not run; inspect index_status and retry once ready. '
       + 'Read target files again before editing, because code may change after a search.',
@@ -75,13 +76,18 @@ export function createMcpServer(config, {resolveConfig, automatic = false} = {})
     title:'Repository index status',
     description:'Inspect repository synchronization, current generation, embedding reuse and last update error. '
       + workspaceInstructions
-      + 'Status is the latest background observation; search_code actively checks source freshness.',
-    inputSchema:{directory_path:directoryPath},annotations,
-  }, async ({directory_path},extra) => {
+      + 'Without path, status is the latest background observation. Set path to a workspace-relative file or directory ("." for the whole workspace) '
+      + 'to check current coverage: indexed, pending, excluded with a reason, deleted or not_found. Coverage checks do not wake idle indexing. '
+      + 'Use nextCursor for another page; if coverage changes, restart without cursor. search_code actively synchronizes source freshness.',
+    inputSchema:{directory_path:directoryPath,
+      path:z.string().min(1).max(4096).optional().describe('Workspace-relative file or directory to inspect; use "." to list coverage.'),
+      limit:z.number().int().min(1).max(200).optional().describe('Coverage entries per page; defaults to 50.'),
+      cursor:z.string().max(80).optional().describe('nextCursor from the previous coverage page.')},annotations,
+  }, async ({directory_path,path,limit,cursor},extra) => {
     let lease;
     try {
       lease = await selectConfig(directory_path);
-      const result = await indexStatus({config:lease.config,signal:extra.signal});
+      const result = await indexStatus({config:lease.config,signal:extra.signal,path,limit,cursor});
       return {content:[{type:'text',text:JSON.stringify(result)}],structuredContent:result};
     } catch (error) {
       return {isError:true,content:[{type:'text',text:error.message}]};

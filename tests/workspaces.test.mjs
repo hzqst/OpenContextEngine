@@ -14,10 +14,11 @@ async function setup(t, options = {}) {
   const clock = {ms:0};
   const manager = createWorkspaceManager(options.fixed ? {root:first,state:join(dir,'fixed-state')}
     : {state:join(dir,'states')}, {
+    idleMs:options.idleMs ?? 120000, maxWorkspaces:options.maxWorkspaces ?? 3,
     configure: value => value,
     environment: {OCE_CONFIG_HOME:join(dir,'config')}, // Keep the shared user settings out of the test.
     now: () => clock.ms,
-    idleMs: options.idleMs, retryMs: options.retryMs,
+    retryMs: options.retryMs,
     schedule: (sweep, interval) => {sweeps.push({sweep,interval}); return sweeps.length;},
     cancel: () => {},
     start: settings => {
@@ -149,7 +150,7 @@ test('The idle window comes from the shared settings and rejects unusable values
   assert.deepEqual(intervals,[]); // Zero disables reclamation.
   const configured = createWorkspaceManager({state:join(dir,'states')}, {...options, environment:{OCE_CONFIG_HOME:dir,OCE_WORKER_IDLE_SECONDS:'30'}});
   await configured.close();
-  assert.deepEqual(intervals,[30000]);
+  assert.deepEqual(intervals,[1000]); // Sweep often enough to honor the configured window.
   assert.throws(() => createWorkspaceManager({state:join(dir,'states')},
     {...options, environment:{OCE_CONFIG_HOME:dir,OCE_WORKER_IDLE_SECONDS:'soon'}}),
     /OCE_WORKER_IDLE_SECONDS must be zero or a positive number of seconds/);
@@ -166,4 +167,23 @@ test('Workspace requests use the shared handle connection after it reconnects', 
   assert.equal(1,started.length);
   assert.equal(connection,recovered.config);
   recovered.release();
+});
+
+test('Capacity evicts the least recent idle project', async t => {
+  const {manager,started,first,second,sweeps,advance} = await setup(t,{idleMs:1000,maxWorkspaces:1});
+  const firstLease = await manager.get(first);
+  firstLease.release();
+  advance(1000);
+  sweeps[0].sweep();
+  assert.equal(started[0].closes,1);
+  // Once the reclaimed project released its writer lock, another project may start.
+  const secondLease = await manager.get(second);
+  assert.equal(await realpath(second),secondLease.config.root);
+  secondLease.release();
+  advance(1000);
+  sweeps[0].sweep();
+  assert.equal(started[1].closes,1);
+  const again = await manager.get(first);
+  assert.equal(started.length,3);
+  again.release();
 });

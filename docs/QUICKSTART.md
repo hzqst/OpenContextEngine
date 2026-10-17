@@ -32,7 +32,7 @@ open-context-engine setup --python "C:\Program Files\Python312\python.exe"
 
 Use native absolute project paths such as `C:\Users\you\project` in MCP calls. Generated MCP JSON escapes backslashes automatically.
 
-For internal builds, maintainers can create an archive with `npm pack` and install it with `npm install -g /path/to/open-context-engine-0.1.7.tgz`. See the [release checklist](https://github.com/AnnaSuSu/OpenContextEngine/blob/main/docs/RELEASING.md).
+For internal builds, maintainers can create an archive with `npm pack` and install it with `npm install -g /path/to/open-context-engine-0.1.10.tgz`. See the [release checklist](https://github.com/AnnaSuSu/OpenContextEngine/blob/main/docs/RELEASING.md).
 
 The CLI and package are named `open-context-engine`. The previous `opencontextengine` command remains an alias. Existing configuration and cache directories keep their paths, so saved keys and indexes are reused.
 
@@ -73,6 +73,8 @@ OCE_RERANK_API=dashscope
 ```
 
 Supply your API key through `EMBEDDING_API_KEY` and `RERANK_API_KEY`, then run setup to save these settings. DashScope mode calls `/services/rerank/text-rerank/text-rerank`, nests the request under `input` and `parameters`, and reads `output.results`. The embedding model defaults to 1024 dimensions and accepts up to 20 texts per request; `OCE_EMBEDDING_BATCH_SIZE` limits index-building batches (default 64, range 1–64). Query embedding uses at most five texts per MCP search. Clear any previous SSH transport overrides when switching to direct HTTPS endpoints. Changing the embedding provider or model rebuilds the index; existing embeddings are retained for reuse with their original configuration.
+
+Index-building request concurrency is controlled by `OCE_EMBEDDING_CONCURRENCY` (default 1, range 1–8, per workspace). Start with 2 for a remote endpoint to overlap computation and response transfer. This is separate from `OCE_EMBEDDING_BATCH_SIZE` and the server's GPU inference batch size; increase it only within your provider's request and resource limits. The client keeps at most the configured number of batches in flight, validates and caches each completed batch even if responses arrive out of order, and counts committed documents in progress. After a request fails, it stops submitting new batches and preserves successful in-flight results for the next retry. Changing batch size or concurrency does not invalidate cached vectors. Save these settings through setup or the `env` object in the user configuration file, then restart the MCP client after existing indexing work finishes.
 
 HTTPS is the default. For an explicitly trusted remote HTTP deployment, set `OCE_ALLOW_HTTP=1` before running `open-context-engine setup`; setup saves this choice in the shared configuration. HTTP transmits API keys and source text without encryption. Local model endpoints remain prohibited. Set `OCE_EMBEDDING_DIMENSIONS` to the service's actual output size (for example, `2560`); changing the provider or dimensions creates a new index generation and does not mix incompatible cached vectors.
 
@@ -124,7 +126,15 @@ Without `--root`, the server uses **automatic workspace mode**. Your agent suppl
 
 Version **0.1.4** and later automatically share one worker per index directory across compatible clients. Closing a client releases only its lease; a worker exits after all leases expire or are released, no searches remain in flight, and it has been idle for 30 seconds. Clients renew their leases automatically, and reconnect if the worker exits.
 
-The server does not infer your editor's project from its own launch directory. Its tool instructions tell the agent to use the project path supplied by the host, or inspect the current project directory. Missing, relative, or invalid paths return an error. Symbolic links to the same directory share a worker. Supply the same project root consistently, rather than a different subdirectory on each call.
+The server does not infer your editor's project from its own launch directory. Its tool instructions tell the agent to use the project path supplied by the host, or inspect the current project directory. Missing, relative, or invalid paths return an error. Symbolic links to the same directory share a worker.
+
+Overlapping workspaces share immutable code text and embedding data while maintaining their own file manifests, structural graphs, and search paths. If child projects B and C have already been indexed, indexing their parent A reuses their matching vectors and embeds only the remaining or changed documents. This also works when A is indexed first. Each search scores only the units in its requested workspace; unrelated workspace units are not searched. Structural parsing remains workspace-specific so cross-file relationships reflect the full requested scope.
+
+Shared data lives in `~/.cache/opencontextengine/shared-index`, with separate pools for embedding provider, model, dimensions, and revision. Explicit state locations use `.shared-index` under their state parent; set `OCE_SHARED_INDEX_DIRECTORY` to share data across custom locations. File identities use canonical physical paths and content hashes; embedding documents use canonical physical paths so a file has the same vector identity under parent and child roots. Returned paths remain relative to the requested workspace. A cross-process writer lock covers cache lookup and embedding, preventing concurrent workspaces from embedding the same missing document twice. Workspace manifests protect shared data during cache reclamation, including disk restoration and previous generations still used by searches.
+
+Existing indexes remain on disk. Enabling shared data changes embedding document paths, so the first synchronization builds the canonical-path vectors once; subsequent overlapping workspaces reuse them. `index_status` reports `generation.sharedIndex`, `embeddedDocuments`, and `reusedUnits` to show whether new model work was required.
+
+Updates to workspaces with a published index have priority over first-time builds, both at the global build limit and the shared-cache writer lock. A first-time build drains its current embedding requests before yielding, then resumes from cached vectors after the waiting updates. Requests already running and parsing/finalization are allowed to finish; this does not interrupt a model call. `progress.stage: "yielding_to_updates"` identifies a paused build. Process-backed queue tickets disappear on cancellation or are reclaimed after a crash. Unpublished vector shards stay protected from cache reclamation while a build yields.
 
 Example tool arguments (sent by your agent):
 
@@ -137,7 +147,28 @@ To pin the server to one project instead, append `"--root", "/absolute/path/to/y
 | Tool | Purpose |
 | --- | --- |
 | `search_code` | Pass `directory_path` and describe the behavior in `query`. Returns source paths, line numbers, and relevant code; default budget: 8,000 tokens. Pass `budget: 4000` for a smaller response. |
-| `index_status` | Pass `directory_path` to inspect indexing progress, active generation, vector reuse, and the latest update error. First access also starts that project's index. |
+| `index_status` | Pass `directory_path` to inspect indexing progress, active generation, vector reuse, and the latest update error. Add a relative `path` to inspect file or directory coverage. First access also starts that project's index. |
+
+### Index coverage
+
+Check a file with `index_status`:
+
+```json
+{"directory_path":"/absolute/path/to/your-repository","path":"src/session.py"}
+```
+
+Use `"path":"src"` to list a directory or `"path":"."` for the workspace. Coverage returns at most 50 entries by default; set `limit` from 1 to 200 and pass the returned `nextCursor` as `cursor` for another page. If saved source or the published generation changes, restart pagination without a cursor.
+
+| Entry status | Meaning |
+| --- | --- |
+| `indexed` | The published index contains this file's current saved content under the current index configuration. |
+| `pending` | The file is eligible, but its current content or index configuration has not been published yet. |
+| `excluded` | The file or directory is outside indexing eligibility. `reason` explains Git ignores, configured exclusions, dependencies/build output, local environment files, symlinks, binary/non-UTF-8 content, size limits, or generated files. |
+| `deleted` | A file in the published inventory has been removed and awaits reconciliation. |
+| `not_found` | The requested file is absent from both the current tree and the published inventory. |
+| `unknown` | A previous disk index has no readable file manifest. Coverage is available after its next successful synchronization. |
+
+`coverage.synchronized` describes the entire workspace. A file can be `indexed` while another file still needs an update. `summary` counts inventory entries; an excluded directory represents its subtree. Git-ignored trees are not expanded in directory listings; request an ignored path explicitly to see `git-ignored`. Coverage returns paths and reasons, never source content, and performs no parsing or model requests. It checks saved files without waking idle synchronization. Omit `path` for the usual lightweight status observation. The authenticated HTTP equivalent is `GET /status?path=src/session.py` (with optional `limit` and `cursor`).
 
 ### Client setup notes
 
@@ -170,9 +201,9 @@ Client references: [Codex MCP](https://developers.openai.com/codex/mcp) · [Clau
 
 ## Updates & storage
 
-Saved files are checked every second by default (`OCE_POLL_SECONDS=1`), with a 300 ms debounce (`OCE_DEBOUNCE_SECONDS=0.3`). New files, deletions, renames, and branch changes update the index automatically. Embeddings are reused by model identity and actual input content. Structural analysis conservatively refreshes the affected language group to update references in unchanged files.
+While recently used, saved files are checked with a minimum interval of one second (`OCE_POLL_SECONDS=1`), with a 300 ms debounce (`OCE_DEBOUNCE_SECONDS=0.3`). Unchanged files reuse their hashes during background checks; larger trees get a longer interval targeting a 5% scan duty cycle. Background scanning pauses after 60 seconds without a search (`OCE_SCAN_IDLE_SECONDS`, range 0.05–3600 seconds), once any in-progress update finishes. MCP lease renewals and status reads do not keep scanning active; `index_status.backgroundPaused` reports this state. A new search wakes synchronization and reconciles saved source before returning results. New files, deletions, renames, and branch changes update the index during active scanning or on the next search. Embeddings are reused by model identity and actual input content. Structural analysis conservatively refreshes the affected language group to update references in unchanged files.
 
-Search actively checks source hashes before retrieval and again before returning. Each HTTP search waits up to 30 seconds for synchronization by default (`freshnessWaitMs`, maximum 120 seconds). MCP retries `INDEX_UPDATING` once with an additional wait of `min(freshnessWaitMs, 10000)` milliseconds, giving a default synchronization wait of up to 40 seconds across both attempts; `freshnessWaitMs: 0` disables waiting and retry. HTTP pending responses remain 503 and include `code: "INDEX_UPDATING"`, `retryable: true`, and index progress. MCP presents this specific condition as a normal updating status. Failed updates and edits during retrieval still produce explicit errors. Unsaved editor buffers are not indexed.
+Search reconciles the shared source inventory before retrieval and again before returning. On macOS/Linux, unchanged files reuse hashes only when device, inode, size, modification time and change time all match; a full content pass runs at least once per 60 seconds of active scanning. Windows defaults to strict content checks because its stat change-time semantics differ. Set `OCE_STRICT_FRESHNESS=1` for strict content checks on any platform, including network or coarse-timestamp filesystems. Waiting requests subscribe to generation publication instead of repeatedly scanning the tree. Each HTTP search waits up to 30 seconds for synchronization by default (`freshnessWaitMs`, maximum 120 seconds). MCP retries `INDEX_UPDATING` once with an additional wait of `min(freshnessWaitMs, 10000)` milliseconds, giving a default synchronization wait of up to 40 seconds across both attempts; `freshnessWaitMs: 0` disables waiting and retry. HTTP pending responses remain 503 and include `code: "INDEX_UPDATING"`, `retryable: true`, and index progress. MCP presents this specific condition as a normal updating status. Failed updates and edits during retrieval still produce explicit errors. Unsaved editor buffers are not indexed.
 
 Python, JavaScript, TypeScript, and Go files with syntax errors (including unfilled templates) are indexed as plain text with their original paths and line numbers. Healthy files keep their structural analysis; no structural relations are inferred for degraded files. The index remains `ready`, while `index_status` reports `generation.degradedFiles` and `generation.parseDiagnostics` (path, language, error type, line, column, and fallback mode). Search responses include a degraded-file count and MCP displays a short notice. Diagnostics persist across restarts and disappear when the file is repaired or deleted. Model, toolchain, storage, and source-integrity failures still fail explicitly; stale source is never substituted.
 
@@ -228,3 +259,13 @@ First-time setup requires network access to npm/PyPI and tokenizer data. If Pyth
 For issues, include the CLI version, operating system, client name, and the error message. Keep API keys and private source code out of reports.
 
 [Benchmark & test report](BENCHMARKS.md) · [Detailed update design](LIVE_INDEX.md) · [MCP implementation](../src/mcp.mjs)
+
+Search cancellation propagates from the MCP client through the HTTP queue and model connections. A disconnected client stops subsequent retrieval work and releases its queue slot. Requests also carry an overall deadline (at most 180 seconds); background indexing is shared work and is not cancelled by a single search disconnecting.
+
+Idle projects unload their in-memory generations after 120 seconds (`OCE_UNLOAD_IDLE_SECONDS`). MCP workspace handles release leases after `OCE_WORKER_IDLE_SECONDS` of tool inactivity (default 300; `OCE_WORKSPACE_IDLE_SECONDS` is accepted as an alias; `0` disables reclamation) and retain at most three projects (`OCE_MAX_WORKSPACES`); least-recently-used idle handles are released first. Active HTTP requests retain their worker until completion. Cross-process admission defaults to three resident workers and one index build (`OCE_MAX_RESIDENT_WORKERS`, `OCE_MAX_CONCURRENT_BUILDS`). Default workspaces share `~/.cache/opencontextengine/resources`; explicit state directories share a `.resources` directory under their state parent. Set `OCE_RESOURCE_DIRECTORY` to coordinate custom state locations. Workers waiting for capacity report `waiting_for_capacity` and wake when another project unloads. Disk indexes are retained for restoration.
+
+Source admission defaults to 50,000 files and 256 MiB of eligible source (`OCE_MAX_FILES`, `OCE_MAX_SOURCE_BYTES`). Exceeding a limit fails explicitly without publishing a partial index. `OCE_EXCLUDE` accepts a JSON array of repository-relative glob patterns, for example `["artifacts/**", "**/artifacts/**"]`. Unchanged source text and canonical parsed units are reused; structural adapters still invalidate a language group when its cross-file dependencies may change. Lexical features and token counts are reused for unchanged units.
+
+Live generations store stable source identities in content-addressed source buckets and reference immutable vector shards of at most 64 rows. Editing a file writes only changed source buckets and new vector rows; existing matrices are not copied into a new full-size array. Dense retrieval reads shards through bounded memory mappings. In-flight generations pin their shards until their searches finish. Existing blob caches migrate in batches without new model requests. The defaults are 200,000 units, 2 GiB of active vector payload, and 4 GiB of retained vector cache (`OCE_MAX_UNITS`, `OCE_MAX_VECTOR_BYTES`, `OCE_VECTOR_CACHE_BYTES`). Cache reclamation removes least-recently-used unpinned shards; active generations may temporarily exceed the cache target. Metadata and source shards are additional storage. Old SQLite blob pages are reclaimed after migration when most pages are free.
+
+An admitted background build may finish after its last client becomes idle; its worker exits afterward if no leases or requests remain. Parser subprocesses participate in worker cancellation and are reaped when stopped. Repeated failures back off exponentially, up to 60 seconds, and idle failures stop retrying.

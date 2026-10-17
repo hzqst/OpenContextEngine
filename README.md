@@ -23,7 +23,7 @@ It indexes your working directory and follows saved changes. Given a natural-lan
 - **Search beyond exact words.** Describe a behavior; retrieve its implementation and connected code across files.
 - **Understand code structure.** Python, TypeScript, JavaScript, and Go adapters, plus text fallback for other languages, configuration, and scripts.
 - **Stay current as you edit.** Saved changes, file deletions, and branch switches sync automatically. Unchanged embeddings are reused; incomplete updates never replace a complete index.
-- **Work across projects through MCP.** Your agent supplies the project path; indexes start on demand and are reused. `search_code` retrieves evidence; `index_status` reports synchronization.
+- **Work across projects through MCP.** Your agent supplies the project path; indexes start on demand and are reused. `search_code` retrieves evidence; `index_status` reports synchronization and explains file coverage when given a relative `path`.
 
 ## Measured results
 
@@ -37,7 +37,11 @@ Measured with the optional batch rerank API. 40 source-derived tasks, each asked
 
 Requires **macOS, Linux, or Windows**, Node.js 22.14+, Python 3.10+, Git, and configured embedding/reranking services. Go repositories also need Go 1.22+.
 
-Native Windows support is available in version **0.1.3** and later. Run the installation commands in PowerShell. Version **0.1.4** adds automatic worker sharing across MCP sessions to prevent index-lock conflicts. Version **0.1.5** raises the default retrieval output budget to 8,000 tokens; pass `budget: 4000` when a smaller response is sufficient. Version **0.1.6** reports pending indexing as progress, retries once, and keeps actual indexing failures explicit. Version **0.1.7** prevents Windows console popups from background workers and their helper processes.
+Native Windows support is available in version **0.1.3** and later. Run the installation commands in PowerShell. Version **0.1.4** adds automatic worker sharing across MCP sessions to prevent index-lock conflicts. Version **0.1.5** raises the default retrieval output budget to 8,000 tokens; pass `budget: 4000` when a smaller response is sufficient. Version **0.1.6** reports pending indexing as progress, retries once, and keeps actual indexing failures explicit. Version **0.1.7** prevents Windows console popups from background workers and their helper processes. Version **0.1.8** adds configurable embedding request concurrency for indexing (`OCE_EMBEDDING_CONCURRENCY`, default 1), with bounded requests and reusable results after failures.
+
+Version **0.1.9** reduces idle CPU and memory use, reuses unchanged source and immutable vector shards, propagates cancellation to model calls and parser helpers, and bounds workspace, indexing, and cache resources.
+
+Version **0.1.10** shares immutable code text and embeddings across overlapping workspaces, prioritizes updates to existing indexes over first-time builds, and adds file and directory coverage checks to `index_status`. Parent and child workspaces keep their own search scope. The first synchronization of an existing index builds canonical-path vectors once; later overlapping workspaces reuse them. [Coverage and shared-cache settings →](docs/QUICKSTART.md#index-coverage)
 
 Install from npm, then expand your client's guide. Model settings are shared across clients on the same machine.
 
@@ -147,6 +151,8 @@ Your agent supplies the current project's absolute path as `directory_path`. To 
 </details>
 
 [Model configuration, troubleshooting, and update behavior →](docs/QUICKSTART.md)
+
+Parent and child workspaces share cached code text and embeddings. Each workspace keeps its own file scope and search paths; indexing a parent reuses matching child data and embeds only uncached documents. See [overlapping workspace behavior](docs/QUICKSTART.md#3-add-the-mcp-server) for cache configuration and the one-time migration from older indexes.
 
 ## Explore
 

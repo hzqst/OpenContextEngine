@@ -20,6 +20,8 @@ from evidence import EvidenceEngine, VERSION
 from planning import plan_query
 from live import LiveIndex, IndexUnavailable
 from writer_lock import WriterBusy
+from cancellation import RequestScope, Cancelled, check
+from urllib.parse import urlsplit, parse_qs
 from shared_worker import SharedWorker
 
 
@@ -74,10 +76,29 @@ def serve(config):
         def do_GET(self):
             if self.path == '/healthz':
                 return self.reply(200, {'status':'running','engine':VERSION,'mode':'live'} if live else health)
-            if self.path == '/status':
+            if urlsplit(self.path).path == '/status':
                 if not secrets.compare_digest(self.headers.get('Authorization',''), 'Bearer '+config['serviceKey']):
                     return self.reply(401, {'error':'Unauthorized'})
-                return self.reply(200, live.status() if live else {'status':'ready','mode':'frozen','generation':index})
+                try:
+                    params = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=3)
+                    if set(params)-{'path', 'limit', 'cursor'} or any(len(values) != 1 for values in params.values()):
+                        raise ValueError('Unknown or repeated status parameters')
+                    if params and 'path' not in params:
+                        raise ValueError('Coverage pagination requires path')
+                    result = live.status() if live else {'status':'ready','mode':'frozen','generation':index}
+                    if 'path' in params:
+                        if not live:
+                            raise ValueError('Coverage checks require a live workspace index')
+                        with RequestScope(timeout=30, connection=self.connection):
+                            result['coverage'] = live.coverage(params['path'][0],
+                                limit=int(params.get('limit', ['50'])[0]), cursor=params.get('cursor', [None])[0])
+                    return self.reply(200, result)
+                except ValueError as error:
+                    return self.reply(422, {'error': str(error)})
+                except Cancelled:
+                    return self.reply(503, {'error': 'Coverage check cancelled or timed out'})
+                except (OSError, KeyError, TypeError):
+                    return self.reply(503, {'error': 'Coverage inventory unavailable; retry later'})
             self.reply(404,{'error':'Not found'})
 
         def do_POST(self):
@@ -103,10 +124,13 @@ def serve(config):
                 if not 1<=length<=32768:
                     raise ValueError('Invalid body size')
                 body = json.loads(self.rfile.read(length))
-                if not isinstance(body,dict) or set(body)-{'query','budget','trace','freshnessWaitMs'}:
+                if not isinstance(body,dict) or set(body)-{'query','budget','trace','freshnessWaitMs','requestTimeoutMs'}:
                     raise ValueError('Unknown fields')
                 query,budget = body.get('query'),body.get('budget',8000)
                 wait_ms = body.get('freshnessWaitMs', 30000)
+                request_ms = body.get('requestTimeoutMs', 180000)
+                if type(request_ms) is not int or not 1 <= request_ms <= 180000:
+                    raise ValueError('Invalid request deadline')
                 if type(wait_ms) is not int or not 0 <= wait_ms <= 120000:
                     raise ValueError('Invalid freshness wait')
                 if not isinstance(query,str) or not query.strip() or len(query)>8192 or type(budget) is not int or not 256<=budget<=8000 or type(body.get('trace',False)) is not bool:
@@ -119,12 +143,20 @@ def serve(config):
             if shared and not shared.enter():
                 slots.release()
                 return self.reply(503, {'error': 'Worker is stopping'})
-            if not lock.acquire(timeout=30):
-                slots.release()
-                if shared:
-                    shared.leave()
-                return self.reply(429, {'error': 'Retrieval queue wait exceeded 30 seconds; retry later'})
+            acquired = False
+            using_index = False
+            scope = RequestScope(request_ms/1000, self.connection)
+            scope.__enter__()
             try:
+                while not acquired:
+                    check()
+                    acquired = lock.acquire(timeout=.05)
+                    if not acquired and time.monotonic()-start >= 30:
+                        return self.reply(429, {'error': 'Retrieval queue wait exceeded 30 seconds; retry later'})
+                check()
+                if live:
+                    live.enter_query()
+                    using_index = True
                 queued = round((time.monotonic()-start)*1000)
                 generation = live.current(wait_ms/1000) if live else None
                 engine = generation.engine if live else retrieval
@@ -132,6 +164,7 @@ def serve(config):
                     raw,debug = '', {'tokens':0,'elapsedMs':0}
                 else:
                     raw,debug = engine.search(plan_query(query),budget=budget)
+                check()
                 if live:
                     live.verify(generation)
                 response = {'context':raw,'tokens':debug['tokens'],'engine':VERSION,
@@ -143,6 +176,14 @@ def serve(config):
                 if body.get('trace'):
                     response['diagnostics'] = debug
                 self.reply(200,response)
+            except Cancelled:
+                if time.monotonic() >= scope.deadline:
+                    try:
+                        self.reply(504, {'error': 'Request deadline exceeded'})
+                    except OSError:
+                        pass
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except IndexUnavailable as error:
                 self.reply(503,{'error':str(error),'code':error.code,
                                'retryable':error.code == 'INDEX_UPDATING','index':live.status()})
@@ -150,7 +191,11 @@ def serve(config):
                 print(json.dumps({'event':'search-failed','type':type(error).__name__}),flush=True)
                 self.reply(502,{'error':'Retrieval or model request failed'})
             finally:
-                lock.release()
+                scope.__exit__(None, None, None)
+                if using_index:
+                    live.leave_query()
+                if acquired:
+                    lock.release()
                 slots.release()
                 if shared:
                     shared.leave()
@@ -159,7 +204,7 @@ def serve(config):
     server.daemon_threads = True
     if shared:
         shared.publish(server.server_port)
-        shared.monitor(server)
+        shared.monitor(server, busy=lambda: live.building)
     try:
         print(json.dumps({'listening':f'http://127.0.0.1:{server.server_port}',
                           'health':{'status':'running','mode':'live'} if live else health}),flush=True)

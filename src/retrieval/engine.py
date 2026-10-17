@@ -5,6 +5,11 @@ whole-span packing are repository independent. No evaluation labels are read.
 """
 from collections import Counter, defaultdict
 import hashlib
+import http.client
+import socket
+from urllib.parse import urlsplit
+from urllib.error import HTTPError
+from cancellation import check, current
 import json
 import math
 import re
@@ -26,10 +31,41 @@ def terms(text):
 
 
 def post(url, payload, key='local-only', timeout=120):
-    request = Request(url, json.dumps(payload).encode(), {
-        'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
-    with urlopen(request, timeout=timeout) as response:
-        return json.load(response)
+    check()
+    target = urlsplit(url)
+    if target.scheme not in ('http', 'https'):
+        raise ValueError('Unsupported model URL')
+    scope = current()
+    remaining = min(timeout, max(.01, scope.deadline-time.monotonic())) if scope else timeout
+    connection = (http.client.HTTPSConnection if target.scheme == 'https' else http.client.HTTPConnection)(
+        target.hostname, target.port, timeout=remaining)
+    unregister = lambda: None
+    try:
+        connection.connect()
+        sock = connection.sock
+        def interrupt():
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        if scope:
+            unregister = scope.register(interrupt)
+        check()
+        path = (target.path or '/') + ('?'+target.query if target.query else '')
+        connection.request('POST', path, json.dumps(payload).encode(), {
+            'Content-Type': 'application/json', 'Authorization': 'Bearer '+key})
+        response = connection.getresponse()
+        if not 200 <= response.status < 300:
+            raise HTTPError(url, response.status, response.reason, response.headers, None)
+        result = json.loads(response.read())
+        check()
+        return result
+    except Exception:
+        check()
+        raise
+    finally:
+        unregister()
+        connection.close()
 
 
 def document(u, limit=2200):
@@ -37,16 +73,25 @@ def document(u, limit=2200):
 
 
 class Engine:
-    def __init__(self, units, vectors, embed_url, reranker, embedding_key='local-only', embedding_model='Qwen3-Embedding-4B'):
+    def __init__(self, units, vectors, embed_url, reranker, embedding_key='local-only', embedding_model='Qwen3-Embedding-4B', feature_cache=None):
         self.units, self.vectors = units, vectors
         self.embed_url, self.reranker = embed_url, reranker
         self.embedding_key = embedding_key
         self.embedding_model = embedding_model
         self.encoding = tiktoken.get_encoding('cl100k_base')
         self.postings = defaultdict(list)
-        lengths = []
+        lengths, costs, next_features = [], [], {}
         for u in units:
-            counts = Counter(terms((u['path'] + ' ' + u['name'] + ' ') * 3 + u['text']))
+            check()
+            rendered = self.render(u)
+            key = hashlib.sha256((u['name']+'\n'+rendered).encode()).hexdigest()
+            feature = feature_cache.get(key) if feature_cache is not None else None
+            if feature is None:
+                feature = (Counter(terms((u['path'] + ' ' + u['name'] + ' ') * 3 + u['text'])),
+                           len(self.encoding.encode_ordinary(rendered))+2)
+            counts, cost = feature
+            next_features[key] = feature
+            costs.append(cost)
             lengths.append(sum(counts.values()))
             for term, frequency in counts.items():
                 self.postings[term].append((u['id'], frequency))
@@ -54,9 +99,13 @@ class Engine:
         self.average_length = max(1, self.lengths.mean())
         self.incoming = defaultdict(list)
         for u in units:
+            check()
             for target in u['edges']:
                 self.incoming[target].append(u['id'])
-        self.costs = [len(self.encoding.encode_ordinary(self.render(u))) + 2 for u in units]
+        self.costs = costs
+        if feature_cache is not None:
+            feature_cache.clear()
+            feature_cache.update(next_features)
 
     @staticmethod
     def render(u):
@@ -68,6 +117,7 @@ class Engine:
     def lexical(self, query):
         scores = np.zeros(len(self.units))
         for term in set(terms(query)):
+            check()
             matches = self.postings.get(term, [])
             if not matches:
                 continue

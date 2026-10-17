@@ -1,6 +1,7 @@
 """Snapshot-bound language adapters; downstream retrieval consumes only CodeUnit."""
 from collections import defaultdict
 from copy import deepcopy
+from cancellation import check
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -69,15 +70,17 @@ def extract_with_fallback(adapter, sources, max_lines, settings):
 
 
 def source_units(root, files, max_lines=65, language_options=None, report=None, cache=None,
-                 exclude_suffixes=()):
+                 sources_cache=None, exclude_suffixes=()):
     if type(max_lines) is not int or max_lines < 1:
         raise ValueError('max_lines must be a positive integer')
     root = Path(root).resolve()
     exclude_suffixes = normalize_suffixes(exclude_suffixes)
     groups, sources, seen, excluded = defaultdict(list), [], set(), []
     options = language_options or {}
-    adapter_manifest(files, options)  # Validate configuration before reading source.
+    manifest = adapter_manifest(files, options)  # Compute runtime identity once per update.
+    next_sources = {}
     for file in files:
+        check()
         name = file['path']
         path = PurePosixPath(name)
         if (path.is_absolute() or '..' in path.parts or '\\' in name or str(path) != name
@@ -93,13 +96,16 @@ def source_units(root, files, max_lines=65, language_options=None, report=None, 
         if reason:
             excluded.append({'path': name, 'reason': reason})
             continue
-        raw, content, reason = read_text(resolved)
-        if reason:
-            excluded.append({'path': name, 'reason': reason})
-            continue
-        if hashlib.sha256(raw).hexdigest() != file['sha256']:
-            raise ValueError('Source changed: ' + name)
-        source = SourceFile(name, content, file['sha256'])
+        source = sources_cache.get(name) if sources_cache is not None else None
+        if source is None or source.sha256 != file['sha256']:
+            raw, content, reason = read_text(resolved)
+            if reason:
+                excluded.append({'path': name, 'reason': reason})
+                continue
+            if hashlib.sha256(raw).hexdigest() != file['sha256']:
+                raise ValueError('Source changed: ' + name)
+            source = SourceFile(name, content, file['sha256'])
+        next_sources[name] = source
         sources.append(source)
         language = language_for(name)
         groups['typescript' if language == 'javascript' else language].append(source)
@@ -119,16 +125,23 @@ def source_units(root, files, max_lines=65, language_options=None, report=None, 
         batches = [[source] for source in subset] if cache is not None and language == 'text' else [subset]
         units = []
         for batch in batches:
+            check()
             key = (language, batch[0].path if language == 'text' else '')
             fingerprint = (hashlib.sha256(json.dumps([
                 [(s.path, s.sha256) for s in batch], max_lines, settings,
-                adapter_manifest([{'path': s.path} for s in batch], options),
+                manifest,
             ], sort_keys=True).encode()).hexdigest() if cache is not None else None)
             previous = cache.get(key) if cache is not None else None
-            extracted = (deepcopy(previous[1]) if previous and previous[0] == fingerprint
-                         else extract_with_fallback(ADAPTERS[language], batch, max_lines, settings))
-            if cache is not None:
-                pending_cache[key] = (fingerprint, deepcopy(extracted))
+            if previous and previous[0] == fingerprint:
+                # Cached canonical units remain immutable; only the ID projection is copied.
+                extracted = [{**unit, 'relations': [dict(r) for r in unit['relations']],
+                              'edges': list(unit['edges'])} for unit in previous[1]]
+                pending_cache[key] = previous
+            else:
+                extracted = extract_with_fallback(ADAPTERS[language], batch, max_lines, settings)
+                validate_units(extracted, batch)
+                if cache is not None:
+                    pending_cache[key] = (fingerprint, deepcopy(extracted))
             offset = len(units)
             for unit in extracted:
                 unit['id'] += offset
@@ -136,7 +149,6 @@ def source_units(root, files, max_lines=65, language_options=None, report=None, 
                     relation['target'] += offset
                 unit['edges'] = [target + offset for target in unit['edges']]
             units.extend(extracted)
-        validate_units(units, subset)
         for unit in units:
             by_path[unit['path']].append(unit)
             identities[id(unit)] = (language, unit['id'])
@@ -147,10 +159,12 @@ def source_units(root, files, max_lines=65, language_options=None, report=None, 
         for relation in unit['relations']:
             relation['target'] = remap[(identities[id(unit)][0], relation['target'])]
         unit['edges'] = sorted({relation['target'] for relation in unit['relations']})
-    validate_units(units, sources)
     if cache is not None:
         cache.clear()
         cache.update(pending_cache)
+    if sources_cache is not None:
+        sources_cache.clear()
+        sources_cache.update(next_sources)
     if report is not None:
         diagnostics = [unit['parseDiagnostic'] for unit in units if 'parseDiagnostic' in unit]
         report.update(inputFiles=len(files), acceptedFiles=len(sources), excluded=excluded,
